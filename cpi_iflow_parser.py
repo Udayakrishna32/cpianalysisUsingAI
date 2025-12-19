@@ -3,8 +3,8 @@
 SAP CPI AI Explainer
 1. Parses iFlow from ZIP.
 2. Extracts technical logic (Groovy, Content Modifiers, Adapters).
-3. Sends specific chunks to OpenRouter (using Google Gemma Free) for summarization.
-4. limits execution to first 7 steps to save quota.
+3. Resolves external parameters (parameters.prop).
+4. Sends optimized context to LOCAL OLLAMA API using Llama 3.1.
 """
 
 import zipfile
@@ -17,10 +17,10 @@ import urllib.error
 from pathlib import Path
 
 # --- CONFIGURATION ---
-# PASTE YOUR OPENROUTER API KEY HERE
-API_KEY = "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" 
-# Using the specific free model requested
-MODEL_NAME = "google/gemma-3n-e4b-it:free"
+# LOCAL OLLAMA ENDPOINT
+API_URL = "http://localhost:11434/api/chat"
+# Using Local Model
+MODEL_NAME = "llama3.1:8b" 
 MAX_STEPS = 1000  # Limit to 1000 steps (effectively all)
 # ---------------------
 
@@ -32,81 +32,53 @@ for prefix, uri in NAMESPACES.items():
     ET.register_namespace(prefix, uri)
 
 class AIHelper:
-    def __init__(self, api_key):
-        self.api_key = api_key
-        # OpenRouter API Endpoint
-        self.url = "https://openrouter.ai/api/v1/chat/completions"
+    def __init__(self):
+        self.url = API_URL
 
     def generate_summary(self, prompt_context, data_content):
-        """Sends text to OpenRouter and returns a 1-sentence summary."""
-        if not data_content or not self.api_key or "PASTE_YOUR" in self.api_key:
-            return "(Skipped: No API Key or Empty Content)"
+        """Sends text to Local Ollama and returns a clear business summary."""
+        if not data_content:
+            return "(Skipped: Empty Content)"
 
-        # Construct Prompt
+        # Construct a specialized prompt for clarity
         full_prompt = (
-            f"You are an SAP Integration Expert. Summarize this {prompt_context} logic in ONE simple sentence. "
-            f"Focus on the 'Why' and 'What', not the syntax.\n\n"
-            f"DATA:\n{data_content}"
+            f"Explain this specific '{prompt_context}' step.\n"
+            f"TECHNICAL DATA:\n{data_content}"
         )
 
-        # OpenRouter / OpenAI Compatible Payload
+        # Ollama Payload Structure
         payload = {
             "model": MODEL_NAME,
+            "stream": False, # Important for simple Request/Response
             "messages": [
                 {
-                    "role": "user",
+                    "role": "system", 
+                    "content": "You are a concise SAP CPI expert. Summarize the logic in ONE to TWO simple sentence. Dont miss the things it used for that step for example it used x property for one thing in content modifier, x query in successfactors like that . Just say what it does."
+                },
+                {
+                    "role": "user", 
                     "content": full_prompt
                 }
             ]
         }
 
-        # Headers for OpenRouter
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://localhost", # Required by OpenRouter, using dummy
-            "X-Title": "CPI Explainer Script"
-        }
-
-        # Retry Logic for Rate Limits (HTTP 429)
-        max_retries = 3
-        backoff_factor = 2 # Wait 2s, 4s, 8s...
-
-        for attempt in range(max_retries + 1):
-            try:
-                req = urllib.request.Request(
-                    self.url,
-                    data=json.dumps(payload).encode('utf-8'),
-                    headers=headers
-                )
-                with urllib.request.urlopen(req) as response:
-                    result = json.loads(response.read().decode('utf-8'))
-                    # Extract text from OpenRouter/OpenAI format: choices[0].message.content
-                    try:
-                        return result['choices'][0]['message']['content'].strip()
-                    except:
-                        return "(AI Error: Could not parse response)"
-            
-            except urllib.error.HTTPError as e:
-                # Handle Rate Limits (429)
-                if e.code == 429:
-                    if attempt < max_retries:
-                        wait_time = backoff_factor ** (attempt + 1)
-                        print(f"      (⚠️ Rate limit hit. Retrying in {wait_time}s...)")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        return "(AI Error: Rate Limit Exceeded after retries)"
-                
-                # Try to read error body for more info
+        try:
+            req = urllib.request.Request(
+                self.url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode('utf-8'))
                 try:
-                    error_body = e.read().decode('utf-8')
-                    # print(f"DEBUG: {error_body}") 
+                    return result["message"]["content"].strip()
                 except:
-                    pass
-                return f"(AI Error: HTTP {e.code})"
-            except Exception as e:
-                return f"(AI Error: {str(e)})"
+                    return "(AI Error: Could not parse response)"
+        
+        except urllib.error.URLError as e:
+             return f"(AI Error: Connection Refused - Is Ollama running? {e})"
+        except Exception as e:
+            return f"(AI Error: {str(e)})"
 
 class CPIFlowAnalyzer:
     def __init__(self, zip_path):
@@ -115,43 +87,73 @@ class CPIFlowAnalyzer:
         self.root = None
         self.elements = {}
         self.adapter_configs = {}  # Map node_id -> adapter properties
+        self.parameters = {}       # Map param_key -> param_value
         self.step_counter = 0
         self.zip_file = None
-        self.ai = AIHelper(API_KEY)
+        self.ai = AIHelper()
 
     def load(self):
         """Load and Parse XML"""
         try:
             self.zip_file = zipfile.ZipFile(self.zip_path, 'r')
-            # Find .iflw
+            self._load_parameters()
             candidates = [f for f in self.zip_file.namelist() if f.endswith('.iflw') and 'integrationflow' in f.lower()]
             if not candidates: raise Exception("No .iflw found")
             
             with self.zip_file.open(candidates[0]) as f:
                 self.xml_content = f.read()
-                
             self.root = ET.fromstring(self.xml_content)
             self._parse_elements()
         except Exception as e:
             print(f"Error loading ZIP: {e}")
             sys.exit(1)
 
+    def _load_parameters(self):
+        """Parses parameters.prop to resolve {{placeholders}}"""
+        try:
+            candidates = [f for f in self.zip_file.namelist() if f.endswith('parameters.prop')]
+            if not candidates: return
+            with self.zip_file.open(candidates[0]) as f:
+                content = f.read().decode('utf-8', errors='ignore')
+                for line in content.splitlines():
+                    if '=' in line and not line.startswith('#'):
+                        key, val = line.split('=', 1)
+                        self.parameters[key.strip()] = val.strip()
+            print(f"   > Loaded {len(self.parameters)} external parameters.")
+        except Exception:
+            pass
+
+    def _resolve_placeholders(self, props):
+        """Replaces {{Key}} with actual value from parameters.prop"""
+        resolved = {}
+        for k, v in props.items():
+            if v and isinstance(v, str) and '{{' in v and '}}' in v:
+                clean_key = v.replace('{{', '').replace('}}', '').strip()
+                if clean_key in self.parameters:
+                    resolved[k] = self.parameters[clean_key]
+                else:
+                    resolved[k] = v 
+            else:
+                resolved[k] = v
+        return resolved
+
     def _parse_elements(self):
         """Map all BPMN elements"""
-        # 1. Parse Message Flows (Adapters) first to link them to nodes
+        # Parse Message Flows (Adapters)
         for mf in self.root.findall('.//bpmn2:messageFlow', NAMESPACES):
             props = self._get_ifl_properties(mf)
+            props = self._resolve_placeholders(props)
             source = mf.get('sourceRef')
             target = mf.get('targetRef')
-            # Map both directions so we find it whether it's outgoing or incoming
             if source: self.adapter_configs[source] = props
             if target: self.adapter_configs[target] = props
 
-        # 2. Parse Nodes
+        # Parse Nodes
         for elem in self.root.findall('.//*[@id]'):
             elem_id = elem.get('id')
             tag = elem.tag.split('}')[-1]
             props = self._get_ifl_properties(elem)
+            props = self._resolve_placeholders(props)
             readable_type = self._determine_readable_type(elem, tag, props)
             
             self.elements[elem_id] = {
@@ -195,68 +197,44 @@ class CPIFlowAnalyzer:
             if elem.find('.//bpmn2:timerEventDefinition', NAMESPACES) is not None: return "Start Timer"
             if elem.find('.//bpmn2:messageEventDefinition', NAMESPACES) is not None: return "Start Message"
             return "Start"
-        
-        if tag == 'endEvent':
-            return "End"
-
+        if tag == 'endEvent': return "End"
         if tag == 'callActivity':
             if activity_type == 'Mapping':
-                m_type = props.get('mappingType', '')
-                if m_type == 'MessageMapping': return "Message Mapping"
                 map_name = props.get('mappingname', '')
                 if sub_activity_type == 'XSLTMapping' or 'XSLT' in map_name: return "XSLT Mapping"
-                return "Mapping"
-            if activity_type == 'Script':
-                return "Groovy Script"
-            if activity_type == 'Enricher':
-                return "Content Modifier"
-            if activity_type == 'Splitter':
-                return "Splitter"
-            if activity_type == 'XmlModifier':
-                return "XML Modifier"
-            if activity_type == 'ProcessCallElement':
-                return "Process Call"
-            if activity_type == 'Filter':
-                return "Filter"
-            if activity_type == 'DBStorage':
-                return "Data Store"
+                return "Message Mapping"
+            if activity_type == 'Script': return "Groovy Script"
+            if activity_type == 'Enricher': return "Content Modifier"
+            if activity_type == 'Splitter': return "Splitter"
+            if activity_type == 'XmlModifier': return "XML Modifier"
+            if activity_type == 'ProcessCallElement': return "Process Call"
+            if activity_type == 'Filter': return "Filter"
+            if activity_type == 'DBStorage': return "Data Store"
         
         if tag == 'serviceTask':
-            if activity_type == 'ExternalCall':
-                return "Request Reply"
-            if activity_type == 'contentEnricherWithLookup':
-                return "Content Enricher"
-            if activity_type == 'Send':
-                return "Send"
-            if activity_type == 'DBStorage':
-                return "Data Store"
+            if activity_type == 'ExternalCall': return "Request Reply"
+            if activity_type == 'contentEnricherWithLookup': return "Content Enricher"
+            if activity_type == 'Send': return "Send"
+            if activity_type == 'DBStorage': return "Data Store"
 
-        if 'Gateway' in tag:
-            return "Router"
-
+        if 'Gateway' in tag: return "Router"
         return activity_type if activity_type != 'Unknown' else tag
 
     def get_resource_content(self, filename):
-        """Finds a file in the zip (script, mapping) and returns content"""
+        """Finds a file in the zip and returns content"""
         if not filename: return None
-        
-        # Search patterns
         search_paths = [
             f"src/main/resources/script/{filename}",
             f"src/main/resources/groovy/{filename}",
             f"src/main/resources/mapping/{filename}",
             f"src/main/resources/xsd/{filename}"
         ]
-        
-        # Try direct match
         for path in search_paths:
             try:
                 with self.zip_file.open(path) as f:
                     return f.read().decode('utf-8', errors='ignore')
-            except KeyError:
-                continue
-                
-        # Fallback: scan all files
+            except KeyError: continue
+        # Fallback scan
         for f in self.zip_file.namelist():
             if f.endswith(filename):
                 with self.zip_file.open(f) as file:
@@ -264,79 +242,92 @@ class CPIFlowAnalyzer:
         return None
 
     def analyze_node_with_ai(self, node):
-        """Determines what content to send to AI based on node type"""
+        """Determines what content to send to AI based on node type and gets summary"""
         name = node['name']
         props = node['props']
         n_type = node['type']
         node_id = node['id']
         
-        ai_summary = ""
+        debug_content = ""
+        prompt_ctx = n_type
         
         # 1. GROOVY SCRIPTS
         if n_type == 'Groovy Script':
             script_file = props.get('script')
             if script_file:
-                print(f"      (Reading {script_file}...)")
                 content = self.get_resource_content(script_file)
                 if content:
-                    ai_summary = self.ai.generate_summary("Groovy Script", content)
+                    debug_content = f"Script File: {script_file}\nContent Snippet: {content[:400]}...\n"
+                    # Send full content to AI
+                    return self.ai.generate_summary("Groovy Script", content)
                 else:
-                    ai_summary = "(File not found in ZIP)"
+                    return "(File not found in ZIP)"
 
         # 2. CONTENT MODIFIER
         elif n_type == 'Content Modifier':
-            # Extract headers/properties from XML config string (propertyTable)
-            config_dump = f"Property Table: {props.get('propertyTable', '')}\nHeader Table: {props.get('headerTable', '')}"
-            ai_summary = self.ai.generate_summary("Content Modifier Configuration", config_dump)
+            raw_prop = props.get('propertyTable') or ''
+            raw_head = props.get('headerTable') or ''
+            
+            data_str = ""
+            if 'Name' in raw_prop: 
+                data_str += "Sets Properties: " + raw_prop.replace('<',' ').replace('>',' ') + "\n"
+            if 'Name' in raw_head: 
+                data_str += "Sets Headers: " + raw_head.replace('<',' ').replace('>',' ') + "\n"
+            
+            return self.ai.generate_summary("Content Modifier", data_str or "No variables set")
 
-        # 3. REQUEST REPLY / EXTERNAL CALL / CONTENT ENRICHER / SEND
+        # 3. ADAPTERS (Request Reply, Enricher, Send)
         elif n_type in ['Request Reply', 'Content Enricher', 'Send']:
-            # Fetch adapter properties from Message Flow linkage
             adapter_props = self.adapter_configs.get(node_id, {})
-            
-            # Combine node properties with adapter properties for context
             full_props = {**props, **adapter_props}
-            adapter_dump = json.dumps(full_props, indent=2)
             
-            ai_summary = self.ai.generate_summary("Integration Adapter Configuration", adapter_dump)
+            data_str = ""
+            if 'resourcePath' in full_props: data_str += f"Entity: {full_props['resourcePath']}\n"
+            if 'address' in full_props: data_str += f"System: {full_props['address']}\n"
+            if 'queryOptions' in full_props: data_str += f"Query: {full_props['queryOptions']}\n"
             
-        # 4. MAPPING
+            # Send simplified data + raw dump for context
+            context = data_str + "\nRaw Config:\n" + json.dumps(full_props, indent=2)
+            return self.ai.generate_summary("External Call/Enrichment", context)
+            
+        # 4. MAPPINGS
         elif "Mapping" in n_type:
             map_name = props.get('mappingname', 'Mapping')
-            ai_summary = self.ai.generate_summary("Mapping Name context", f"Mapping Name: {map_name}. This is a transformation step.")
+            return self.ai.generate_summary("Mapping", f"Runs Mapping File: {map_name}")
 
-        # 5. CATCH-ALL (Process Calls, Data Stores, Filters, Splitters, etc.)
-        elif n_type not in ["Router", "End", "Start"]:
-            # For anything else, dump all attributes/properties to AI
-            # This covers Process Calls, Data Stores, Filters, etc.
-            config_dump = json.dumps(props, indent=2)
-            ai_summary = self.ai.generate_summary(f"{n_type} Configuration", config_dump)
+        # 5. ROUTERS
+        elif n_type == 'Router':
+             return self.ai.generate_summary("Router", "This is a routing decision point.")
 
-        return ai_summary
+        # 6. SPLITTERS
+        elif n_type == 'Splitter':
+             expr = props.get('splitExprValue') or props.get('tokenValue') or ''
+             return self.ai.generate_summary("Splitter", f"Splits message using expression: {expr}")
+
+        return "" # Skip generic steps if no info
 
     def find_start_node(self):
         """Find Integration Process Start"""
-        # Look for process named 'Integration Process'
         main_process = None
         for proc in self.root.findall('.//bpmn2:process', NAMESPACES):
             if 'Integration Process' in proc.get('name', ''):
                 main_process = proc
                 break
-        
         if not main_process: return None
         start = main_process.find('bpmn2:startEvent', NAMESPACES)
         return start.get('id') if start is not None else None
 
     def run_limited_flow(self):
-        """Traverse and AI-analyze first MAX_STEPS"""
+        """Traverse and AI-analyze Step-by-Step"""
         curr_id = self.find_start_node()
         if not curr_id:
             print("Could not find start node.")
             return
 
-        print(f"\n🚀 Starting AI Analysis (First {MAX_STEPS} Steps) using OpenRouter...\n")
+        print(f"\n🚀 Starting AI Analysis (Step-by-Step) using Local Ollama ({MODEL_NAME})...\n")
         
         visited = set()
+        
         while curr_id and self.step_counter < MAX_STEPS:
             if curr_id in visited: break
             visited.add(curr_id)
@@ -351,33 +342,29 @@ class CPIFlowAnalyzer:
             # --- AI MAGIC ---
             summary = self.analyze_node_with_ai(node)
             if summary:
-                print(f"   ✨ AI Summary: {summary}")
-                # Rate limit protection: Free models can be slow or limited
-                time.sleep(5) 
+                print(f"   ✨ AI: {summary}")
+                # No rate limit needed for local LLM usually, but keeping a small pause is nice
+                time.sleep(0.5) 
             # ----------------
             
             print("-" * 40)
 
-            # Move next with SMART HEURISTIC
+            # Move next (Smart Heuristic)
             if node['outgoing']:
                 outgoing_links = node['outgoing']
-                
-                # Default: Pick the first one
                 next_id = outgoing_links[0]['target']
-                
-                # Heuristic: If multiple paths (e.g., Router), prefer the one that DOES NOT go to 'End'
                 if len(outgoing_links) > 1:
                     for link in outgoing_links:
                         target_node = self.elements.get(link['target'])
+                        # Try to avoid immediate End events to keep flow going
                         if target_node and target_node['type'] != 'End':
                             next_id = link['target']
-                            break  # Found a path that continues!
-                
+                            break
                 curr_id = next_id
             else:
                 curr_id = None
 
-        print(f"\n🛑 Stopped after {self.step_counter} steps (Test Mode).")
+        print(f"\n🛑 Analysis Complete.")
 
 def main():
     if len(sys.argv) < 2:
