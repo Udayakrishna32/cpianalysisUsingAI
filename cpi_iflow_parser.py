@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-SAP CPI AI Explainer
-1. Parses iFlow from ZIP.
-2. Extracts technical logic (Groovy, Content Modifiers, Adapters).
-3. Resolves external parameters (parameters.prop).
-4. Sends optimized context to LOCAL OLLAMA API using Llama 3.1.
+SAP CPI AI Explainer - Two-Pass Architecture
+1. PASS 1: Step-by-step AI analysis (Technical -> Functional Summary).
+2. PASS 2: Architectural grouping (Functional Summaries -> Phases).
 """
 
 import zipfile
@@ -17,11 +15,15 @@ import urllib.error
 from pathlib import Path
 
 # --- CONFIGURATION ---
-# LOCAL OLLAMA ENDPOINT
 API_URL = "http://localhost:11434/api/chat"
-# Using Local Model
-MODEL_NAME = "llama3.1:8b" 
-MAX_STEPS = 1000  # Limit to 1000 steps (effectively all)
+
+# MODEL 1: Fast model for individual steps
+STEP_MODEL = "llama3.1:8b" 
+
+# MODEL 2: Reasoning model for final grouping (as requested)
+ARCHITECT_MODEL = "llama3.1:8b"
+
+MAX_STEPS = 1000 
 # ---------------------
 
 NAMESPACES = {
@@ -31,37 +33,71 @@ NAMESPACES = {
 for prefix, uri in NAMESPACES.items():
     ET.register_namespace(prefix, uri)
 
+# --- PROMPTS ---
+ARCHITECT_SYSTEM_PROMPT = """Analyze the following SAP CPI iFlow.
+
+Requirements:
+1. Group the steps into logical ARCHITECTURAL PHASES.
+2. Give each phase a clear purpose (why it exists) in 2-5 lines.
+3. Explain how data flows between phases in 2-5 lines.
+4. Call out which phase contains CORE BUSINESS LOGIC in 2-5 lines.
+5. Identify important validations and routing decisions in 2-5 lines.
+6. Mention any redundant or low-value steps in 2-5 lines.
+7. Provide a short “mental model” of the overall flow in 2-5 lines (important).
+
+Do NOT explain every step individually.
+Do NOT repeat CPI documentation.
+Focus on understanding, not description."""
+
 class AIHelper:
     def __init__(self):
         self.url = API_URL
 
-    def generate_summary(self, prompt_context, data_content):
-        """Sends text to Local Ollama and returns a clear business summary."""
-        if not data_content:
-            return "(Skipped: Empty Content)"
-
-        # Construct a specialized prompt for clarity
-        full_prompt = (
-            f"Explain this specific '{prompt_context}' step.\n"
-            f"TECHNICAL DATA:\n{data_content}"
-        )
-
-        # Ollama Payload Structure
+    def get_step_summary(self, context, data):
+        """Pass 1: Get concise explanation of a single step."""
+        if not data: return "(No technical data)"
+        
+        prompt = f"Explain this '{context}' step. TECHNICAL DATA:\n{data}"
         payload = {
-            "model": MODEL_NAME,
-            "stream": False, # Important for simple Request/Response
+            "model": STEP_MODEL,
+            "stream": False,
             "messages": [
-                {
-                    "role": "system", 
-                    "content": "You are a concise SAP CPI expert. Summarize the logic in ONE to TWO simple sentence. Dont miss the things it used for that step for example it used x property for one thing in content modifier, x query in successfactors like that . Just say what it does."
-                },
-                {
-                    "role": "user", 
-                    "content": full_prompt
-                }
+                {"role": "system", "content": "You are a concise SAP CPI expert. Summarize the logic in ONE to Three simple sentence. Do not miss fields or logics used in those. Just say what it does."},
+                {"role": "user", "content": prompt}
             ]
         }
+        return self._call_ollama(payload)
 
+    def get_architectural_analysis(self, full_flow_text):
+        """Pass 2: Group the summarized flow into architectural phases."""
+        prompt = (
+            "Analyze the following SAP CPI iFlow.\n\n"
+            "Requirements:\n"
+            "1. Group the steps into logical ARCHITECTURAL PHASES .\n"
+            "2. Give each phase a clear purpose (why it exists) in 2-5 lines.\n"
+            "3. Explain how data flows between phases in 2-5 lines.\n"
+            "4. Call out which phase contains CORE BUSINESS LOGIC in 2-5 lines.\n"
+            "5. Identify important validations and routing decisions in 2-5 lines.\n"
+            "6. Mention any redundant or low-value steps in 2-5 lines.\n"
+            "7. Provide a short “mental model” of the overall flow.\n\n"
+            "Do NOT explain every step individually.\n"
+            "Do NOT repeat CPI documentation.\n"
+            "Focus on understanding, not description.\n\n"
+            f"iFlow steps:\n{full_flow_text}"
+        )
+        
+        payload = {
+            "model": ARCHITECT_MODEL,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ]
+        }
+        print(f"\n🧠 Sending aggregated context to Architect ({ARCHITECT_MODEL})...")
+        return self._call_ollama(payload)
+
+    def _call_ollama(self, payload):
         try:
             req = urllib.request.Request(
                 self.url,
@@ -70,13 +106,7 @@ class AIHelper:
             )
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read().decode('utf-8'))
-                try:
-                    return result["message"]["content"].strip()
-                except:
-                    return "(AI Error: Could not parse response)"
-        
-        except urllib.error.URLError as e:
-             return f"(AI Error: Connection Refused - Is Ollama running? {e})"
+                return result["message"]["content"].strip()
         except Exception as e:
             return f"(AI Error: {str(e)})"
 
@@ -86,20 +116,18 @@ class CPIFlowAnalyzer:
         self.xml_content = None
         self.root = None
         self.elements = {}
-        self.adapter_configs = {}  # Map node_id -> adapter properties
-        self.parameters = {}       # Map param_key -> param_value
+        self.adapter_configs = {} 
+        self.parameters = {}       
         self.step_counter = 0
         self.zip_file = None
         self.ai = AIHelper()
 
     def load(self):
-        """Load and Parse XML"""
         try:
             self.zip_file = zipfile.ZipFile(self.zip_path, 'r')
             self._load_parameters()
             candidates = [f for f in self.zip_file.namelist() if f.endswith('.iflw') and 'integrationflow' in f.lower()]
             if not candidates: raise Exception("No .iflw found")
-            
             with self.zip_file.open(candidates[0]) as f:
                 self.xml_content = f.read()
             self.root = ET.fromstring(self.xml_content)
@@ -109,7 +137,6 @@ class CPIFlowAnalyzer:
             sys.exit(1)
 
     def _load_parameters(self):
-        """Parses parameters.prop to resolve {{placeholders}}"""
         try:
             candidates = [f for f in self.zip_file.namelist() if f.endswith('parameters.prop')]
             if not candidates: return
@@ -117,67 +144,49 @@ class CPIFlowAnalyzer:
                 content = f.read().decode('utf-8', errors='ignore')
                 for line in content.splitlines():
                     if '=' in line and not line.startswith('#'):
-                        key, val = line.split('=', 1)
-                        self.parameters[key.strip()] = val.strip()
-            print(f"   > Loaded {len(self.parameters)} external parameters.")
-        except Exception:
-            pass
+                        k, v = line.split('=', 1)
+                        self.parameters[k.strip()] = v.strip()
+        except: pass
 
     def _resolve_placeholders(self, props):
-        """Replaces {{Key}} with actual value from parameters.prop"""
-        resolved = {}
+        res = {}
         for k, v in props.items():
-            if v and isinstance(v, str) and '{{' in v and '}}' in v:
-                clean_key = v.replace('{{', '').replace('}}', '').strip()
-                if clean_key in self.parameters:
-                    resolved[k] = self.parameters[clean_key]
-                else:
-                    resolved[k] = v 
+            if isinstance(v, str) and '{{' in v:
+                clean = v.replace('{{', '').replace('}}', '').strip()
+                res[k] = self.parameters.get(clean, v)
             else:
-                resolved[k] = v
-        return resolved
+                res[k] = v
+        return res
 
     def _parse_elements(self):
-        """Map all BPMN elements"""
-        # Parse Message Flows (Adapters)
         for mf in self.root.findall('.//bpmn2:messageFlow', NAMESPACES):
             props = self._get_ifl_properties(mf)
             props = self._resolve_placeholders(props)
-            source = mf.get('sourceRef')
-            target = mf.get('targetRef')
-            if source: self.adapter_configs[source] = props
-            if target: self.adapter_configs[target] = props
+            s, t = mf.get('sourceRef'), mf.get('targetRef')
+            if s: self.adapter_configs[s] = props
+            if t: self.adapter_configs[t] = props
 
-        # Parse Nodes
         for elem in self.root.findall('.//*[@id]'):
-            elem_id = elem.get('id')
+            eid = elem.get('id')
             tag = elem.tag.split('}')[-1]
             props = self._get_ifl_properties(elem)
             props = self._resolve_placeholders(props)
-            readable_type = self._determine_readable_type(elem, tag, props)
-            
-            self.elements[elem_id] = {
-                'id': elem_id,
+            self.elements[eid] = {
+                'id': eid,
                 'name': elem.get('name', ''),
                 'tag': tag,
-                'type': readable_type,
+                'type': self._determine_readable_type(elem, tag, props),
                 'element': elem,
                 'props': props,
                 'outgoing': []
             }
             
-        # Link Flows
         for sf in self.root.findall('.//bpmn2:sequenceFlow', NAMESPACES):
-            source = sf.get('sourceRef')
-            target = sf.get('targetRef')
-            if source in self.elements and target in self.elements:
-                self.elements[source]['outgoing'].append({
-                    'target': target,
-                    'condition': sf.find('bpmn2:conditionExpression', NAMESPACES).text if sf.find('bpmn2:conditionExpression', NAMESPACES) is not None else None
-                })
+            s, t = sf.get('sourceRef'), sf.get('targetRef')
+            if s in self.elements and t in self.elements:
+                self.elements[s]['outgoing'].append({'target': t})
 
     def _get_ifl_properties(self, elem):
-        """Extract properties deeply"""
         props = {}
         for child in elem.iter():
             if child.tag.endswith('property'):
@@ -189,182 +198,117 @@ class CPIFlowAnalyzer:
         return props
 
     def _determine_readable_type(self, elem, tag, props):
-        """Determine specific step type"""
-        activity_type = props.get('activityType', 'Unknown')
-        sub_activity_type = props.get('subActivityType', '')
-        
-        if tag == 'startEvent':
-            if elem.find('.//bpmn2:timerEventDefinition', NAMESPACES) is not None: return "Start Timer"
-            if elem.find('.//bpmn2:messageEventDefinition', NAMESPACES) is not None: return "Start Message"
-            return "Start"
+        atype = props.get('activityType', 'Unknown')
+        if tag == 'startEvent': return "Start Timer" if elem.find('.//bpmn2:timerEventDefinition', NAMESPACES) is not None else "Start Message"
         if tag == 'endEvent': return "End"
         if tag == 'callActivity':
-            if activity_type == 'Mapping':
-                map_name = props.get('mappingname', '')
-                if sub_activity_type == 'XSLTMapping' or 'XSLT' in map_name: return "XSLT Mapping"
-                return "Message Mapping"
-            if activity_type == 'Script': return "Groovy Script"
-            if activity_type == 'Enricher': return "Content Modifier"
-            if activity_type == 'Splitter': return "Splitter"
-            if activity_type == 'XmlModifier': return "XML Modifier"
-            if activity_type == 'ProcessCallElement': return "Process Call"
-            if activity_type == 'Filter': return "Filter"
-            if activity_type == 'DBStorage': return "Data Store"
-        
+            if atype == 'Mapping': return "Message Mapping"
+            if atype == 'Script': return "Groovy Script"
+            if atype == 'Enricher': return "Content Modifier"
+            if atype == 'Splitter': return "Splitter"
+            if atype == 'XmlModifier': return "XML Modifier"
+            if atype == 'ProcessCallElement': return "Process Call"
+            if atype == 'Filter': return "Filter"
+            if atype == 'DBStorage': return "Data Store"
         if tag == 'serviceTask':
-            if activity_type == 'ExternalCall': return "Request Reply"
-            if activity_type == 'contentEnricherWithLookup': return "Content Enricher"
-            if activity_type == 'Send': return "Send"
-            if activity_type == 'DBStorage': return "Data Store"
-
+            if atype == 'ExternalCall': return "Request Reply"
+            if atype == 'contentEnricherWithLookup': return "Content Enricher"
+            if atype == 'Send': return "Send"
         if 'Gateway' in tag: return "Router"
-        return activity_type if activity_type != 'Unknown' else tag
+        return atype if atype != 'Unknown' else tag
 
     def get_resource_content(self, filename):
-        """Finds a file in the zip and returns content"""
         if not filename: return None
-        search_paths = [
-            f"src/main/resources/script/{filename}",
-            f"src/main/resources/groovy/{filename}",
-            f"src/main/resources/mapping/{filename}",
-            f"src/main/resources/xsd/{filename}"
-        ]
+        search_paths = [f"src/main/resources/{sub}/{filename}" for sub in ['script', 'groovy', 'mapping', 'xsd']]
         for path in search_paths:
             try:
-                with self.zip_file.open(path) as f:
-                    return f.read().decode('utf-8', errors='ignore')
+                with self.zip_file.open(path) as f: return f.read().decode('utf-8', errors='ignore')
             except KeyError: continue
-        # Fallback scan
-        for f in self.zip_file.namelist():
-            if f.endswith(filename):
-                with self.zip_file.open(f) as file:
-                    return file.read().decode('utf-8', errors='ignore')
         return None
 
-    def analyze_node_with_ai(self, node):
-        """Determines what content to send to AI based on node type and gets summary"""
+    def get_step_tech_data(self, node):
         name = node['name']
         props = node['props']
-        n_type = node['type']
-        node_id = node['id']
+        ntype = node['type']
+        nid = node['id']
         
-        debug_content = ""
-        prompt_ctx = n_type
-        
-        # 1. GROOVY SCRIPTS
-        if n_type == 'Groovy Script':
-            script_file = props.get('script')
-            if script_file:
-                content = self.get_resource_content(script_file)
-                if content:
-                    debug_content = f"Script File: {script_file}\nContent Snippet: {content[:400]}...\n"
-                    # Send full content to AI
-                    return self.ai.generate_summary("Groovy Script", content)
-                else:
-                    return "(File not found in ZIP)"
-
-        # 2. CONTENT MODIFIER
-        elif n_type == 'Content Modifier':
-            raw_prop = props.get('propertyTable') or ''
-            raw_head = props.get('headerTable') or ''
-            
-            data_str = ""
-            if 'Name' in raw_prop: 
-                data_str += "Sets Properties: " + raw_prop.replace('<',' ').replace('>',' ') + "\n"
-            if 'Name' in raw_head: 
-                data_str += "Sets Headers: " + raw_head.replace('<',' ').replace('>',' ') + "\n"
-            
-            return self.ai.generate_summary("Content Modifier", data_str or "No variables set")
-
-        # 3. ADAPTERS (Request Reply, Enricher, Send)
-        elif n_type in ['Request Reply', 'Content Enricher', 'Send']:
-            adapter_props = self.adapter_configs.get(node_id, {})
-            full_props = {**props, **adapter_props}
-            
-            data_str = ""
-            if 'resourcePath' in full_props: data_str += f"Entity: {full_props['resourcePath']}\n"
-            if 'address' in full_props: data_str += f"System: {full_props['address']}\n"
-            if 'queryOptions' in full_props: data_str += f"Query: {full_props['queryOptions']}\n"
-            
-            # Send simplified data + raw dump for context
-            context = data_str + "\nRaw Config:\n" + json.dumps(full_props, indent=2)
-            return self.ai.generate_summary("External Call/Enrichment", context)
-            
-        # 4. MAPPINGS
-        elif "Mapping" in n_type:
-            map_name = props.get('mappingname', 'Mapping')
-            return self.ai.generate_summary("Mapping", f"Runs Mapping File: {map_name}")
-
-        # 5. ROUTERS
-        elif n_type == 'Router':
-             return self.ai.generate_summary("Router", "This is a routing decision point.")
-
-        # 6. SPLITTERS
-        elif n_type == 'Splitter':
-             expr = props.get('splitExprValue') or props.get('tokenValue') or ''
-             return self.ai.generate_summary("Splitter", f"Splits message using expression: {expr}")
-
-        return "" # Skip generic steps if no info
+        # Build concise tech string for Step AI
+        if ntype == 'Groovy Script':
+            f = props.get('script')
+            c = self.get_resource_content(f)
+            return f"Script: {f}\nCode:\n{c[:500]}..." if c else "File not found"
+        elif ntype == 'Content Modifier':
+            p = props.get('propertyTable') or ''
+            h = props.get('headerTable') or ''
+            return f"Props: {p}\nHeaders: {h}"
+        elif ntype in ['Request Reply', 'Content Enricher', 'Send']:
+            ap = self.adapter_configs.get(nid, {})
+            full = {**props, **ap}
+            return f"System: {full.get('address')}\nEntity: {full.get('resourcePath')}\nQuery: {full.get('queryOptions')}"
+        elif "Mapping" in ntype:
+            return f"Mapping File: {props.get('mappingname')}"
+        elif ntype == 'Router':
+            return "Routing Decision"
+        return "Standard Step"
 
     def find_start_node(self):
-        """Find Integration Process Start"""
-        main_process = None
         for proc in self.root.findall('.//bpmn2:process', NAMESPACES):
             if 'Integration Process' in proc.get('name', ''):
-                main_process = proc
-                break
-        if not main_process: return None
-        start = main_process.find('bpmn2:startEvent', NAMESPACES)
-        return start.get('id') if start is not None else None
+                start = proc.find('bpmn2:startEvent', NAMESPACES)
+                if start is not None: return start.get('id')
+        return None
 
-    def run_limited_flow(self):
-        """Traverse and AI-analyze Step-by-Step"""
-        curr_id = self.find_start_node()
-        if not curr_id:
-            print("Could not find start node.")
-            return
+    def run_two_pass_analysis(self):
+        curr = self.find_start_node()
+        if not curr: return
 
-        print(f"\n🚀 Starting AI Analysis (Step-by-Step) using Local Ollama ({MODEL_NAME})...\n")
+        print(f"🚀 PASS 1: Analyzing steps one-by-one ({STEP_MODEL})...")
         
         visited = set()
+        functional_summaries = []
         
-        while curr_id and self.step_counter < MAX_STEPS:
-            if curr_id in visited: break
-            visited.add(curr_id)
+        while curr and self.step_counter < MAX_STEPS:
+            if curr in visited: break
+            visited.add(curr)
             
-            node = self.elements[curr_id]
-            name = node['name']
-            n_type = node['type']
-            
+            node = self.elements[curr]
             self.step_counter += 1
-            print(f"{self.step_counter}. **{name}** ({n_type})")
+            print(f"   Step {self.step_counter}: {node['name']} ({node['type']})", end="...", flush=True)
             
-            # --- AI MAGIC ---
-            summary = self.analyze_node_with_ai(node)
-            if summary:
-                print(f"   ✨ AI: {summary}")
-                # No rate limit needed for local LLM usually, but keeping a small pause is nice
-                time.sleep(0.5) 
-            # ----------------
+            # 1. Get Tech Data
+            tech_data = self.get_step_tech_data(node)
             
-            print("-" * 40)
+            # 2. Ask Step AI
+            summary = self.ai.get_step_summary(node['type'], tech_data)
+            print(f" -> {summary}")
+            
+            # 3. Store for Pass 2
+            functional_summaries.append(f"Step {self.step_counter}: {node['name']} ({node['type']}) -> {summary}")
 
-            # Move next (Smart Heuristic)
+            # Move next
             if node['outgoing']:
-                outgoing_links = node['outgoing']
-                next_id = outgoing_links[0]['target']
-                if len(outgoing_links) > 1:
-                    for link in outgoing_links:
-                        target_node = self.elements.get(link['target'])
-                        # Try to avoid immediate End events to keep flow going
-                        if target_node and target_node['type'] != 'End':
-                            next_id = link['target']
+                links = node['outgoing']
+                nxt = links[0]['target']
+                if len(links) > 1:
+                    for l in links:
+                        t = self.elements.get(l['target'])
+                        if t and t['type'] != 'End':
+                            nxt = l['target']
                             break
-                curr_id = next_id
+                curr = nxt
             else:
-                curr_id = None
+                curr = None
 
-        print(f"\n🛑 Analysis Complete.")
+        print(f"\n🚀 PASS 2: Sending aggregated flow to Architect ({ARCHITECT_MODEL})...")
+        full_context = "\n".join(functional_summaries)
+        
+        final_analysis = self.ai.get_architectural_analysis(full_context)
+        
+        print("\n" + "="*60)
+        print("🏛️  ARCHITECTURAL ANALYSIS REPORT")
+        print("="*60)
+        print(final_analysis)
+        print("="*60)
 
 def main():
     if len(sys.argv) < 2:
@@ -373,7 +317,7 @@ def main():
     
     analyzer = CPIFlowAnalyzer(sys.argv[1])
     analyzer.load()
-    analyzer.run_limited_flow()
+    analyzer.run_two_pass_analysis()
 
 if __name__ == "__main__":
     main()
