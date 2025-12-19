@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-SAP CPI AI Explainer - Two-Pass Architecture
-1. PASS 1: Step-by-step AI analysis (Technical -> Functional Summary).
-2. PASS 2: Architectural grouping (Functional Summaries -> Phases).
+SAP CPI AI Explainer - RAG Generator
+1. PASS 1: Step-by-step AI analysis.
+2. PASS 2: Architectural grouping.
+3. OUTPUT: Generates a structured JSON file for RAG training.
 """
 
 import zipfile
@@ -16,14 +17,10 @@ from pathlib import Path
 
 # --- CONFIGURATION ---
 API_URL = "http://localhost:11434/api/chat"
-
-# MODEL 1: Fast model for individual steps
 STEP_MODEL = "llama3.1:8b" 
-
-# MODEL 2: Reasoning model for final grouping (as requested)
 ARCHITECT_MODEL = "llama3.1:8b"
-
 MAX_STEPS = 1000 
+OUTPUT_FILE = "cpi_analysis_output.json"
 # ---------------------
 
 NAMESPACES = {
@@ -34,20 +31,12 @@ for prefix, uri in NAMESPACES.items():
     ET.register_namespace(prefix, uri)
 
 # --- PROMPTS ---
-ARCHITECT_SYSTEM_PROMPT = """Analyze the following SAP CPI iFlow.
-
-Requirements:
-1. Group the steps into logical ARCHITECTURAL PHASES.
-2. Give each phase a clear purpose (why it exists) in 2-5 lines.
-3. Explain how data flows between phases in 2-5 lines.
-4. Call out which phase contains CORE BUSINESS LOGIC in 2-5 lines.
-5. Identify important validations and routing decisions in 2-5 lines.
-6. Mention any redundant or low-value steps in 2-5 lines.
-7. Provide a short “mental model” of the overall flow in 2-5 lines (important).
-
-Do NOT explain every step individually.
-Do NOT repeat CPI documentation.
-Focus on understanding, not description."""
+ARCHITECT_SYSTEM_PROMPT = """You are a senior SAP CPI Integration Architect.
+You explain integration flows at ARCHITECTURE level in 2-5 lines, not step-by-step.
+You group steps into logical phases, explain data flow in 2-5 lines, dependencies in 2-5 lines, and business intent in 2-5 lines.
+You explicitly call out core business logic, validations, and decision points.
+You avoid generic descriptions and ignore obvious boilerplate steps.
+You are concise in 2-5 lines, structured, and opinionated."""
 
 class AIHelper:
     def __init__(self):
@@ -62,7 +51,7 @@ class AIHelper:
             "model": STEP_MODEL,
             "stream": False,
             "messages": [
-                {"role": "system", "content": "You are a concise SAP CPI expert. Summarize the logic in ONE to Three simple sentence. Do not miss fields or logics used in those. Just say what it does."},
+                {"role": "system", "content": "You are a concise SAP CPI expert. Summarize the logic in ONE to three simple sentence. Do not miss details like fields , query , logic and other things used. Just say what it does."},
                 {"role": "user", "content": prompt}
             ]
         }
@@ -73,16 +62,13 @@ class AIHelper:
         prompt = (
             "Analyze the following SAP CPI iFlow.\n\n"
             "Requirements:\n"
-            "1. Group the steps into logical ARCHITECTURAL PHASES .\n"
+            "1. Group the steps into logical ARCHITECTURAL PHASES.\n"
             "2. Give each phase a clear purpose (why it exists) in 2-5 lines.\n"
             "3. Explain how data flows between phases in 2-5 lines.\n"
             "4. Call out which phase contains CORE BUSINESS LOGIC in 2-5 lines.\n"
             "5. Identify important validations and routing decisions in 2-5 lines.\n"
-            "6. Mention any redundant or low-value steps in 2-5 lines.\n"
+            "6. Mention any redundant or low-value steps.\n"
             "7. Provide a short “mental model” of the overall flow.\n\n"
-            "Do NOT explain every step individually.\n"
-            "Do NOT repeat CPI documentation.\n"
-            "Focus on understanding, not description.\n\n"
             f"iFlow steps:\n{full_flow_text}"
         )
         
@@ -112,6 +98,7 @@ class AIHelper:
 
 class CPIFlowAnalyzer:
     def __init__(self, zip_path):
+        # FIX: Ensure zip_path is a Path object immediately
         self.zip_path = Path(zip_path)
         self.xml_content = None
         self.root = None
@@ -121,6 +108,11 @@ class CPIFlowAnalyzer:
         self.step_counter = 0
         self.zip_file = None
         self.ai = AIHelper()
+        self.rag_data = {
+            "iflow_file": self.zip_path.name,  # Now safe because self.zip_path is a Path object
+            "steps": [],
+            "architectural_analysis": ""
+        }
 
     def load(self):
         try:
@@ -282,8 +274,18 @@ class CPIFlowAnalyzer:
             summary = self.ai.get_step_summary(node['type'], tech_data)
             print(f" -> {summary}")
             
-            # 3. Store for Pass 2
-            functional_summaries.append(f"Step {self.step_counter}: {node['name']} ({node['type']}) -> {summary}")
+            # 3. Store for Pass 2 AND RAG Data
+            summary_text = f"Step {self.step_counter}: {node['name']} ({node['type']}) -> {summary}"
+            functional_summaries.append(summary_text)
+            
+            # Add to Structured Data
+            self.rag_data["steps"].append({
+                "step_number": self.step_counter,
+                "name": node['name'],
+                "type": node['type'],
+                "technical_data": tech_data,
+                "ai_summary": summary
+            })
 
             # Move next
             if node['outgoing']:
@@ -304,11 +306,19 @@ class CPIFlowAnalyzer:
         
         final_analysis = self.ai.get_architectural_analysis(full_context)
         
+        # Store analysis
+        self.rag_data["architectural_analysis"] = final_analysis
+        
         print("\n" + "="*60)
         print("🏛️  ARCHITECTURAL ANALYSIS REPORT")
         print("="*60)
         print(final_analysis)
         print("="*60)
+        
+        # SAVE JSON
+        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self.rag_data, f, indent=4)
+        print(f"\n✅ RAG Data saved to: {OUTPUT_FILE}")
 
 def main():
     if len(sys.argv) < 2:
