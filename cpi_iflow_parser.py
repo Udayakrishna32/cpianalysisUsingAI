@@ -18,10 +18,10 @@ from pathlib import Path
 
 # --- CONFIGURATION ---
 # PASTE YOUR OPENROUTER API KEY HERE
-API_KEY = "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" 
+API_KEY = "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" 
 # Using the specific free model requested
 MODEL_NAME = "google/gemma-3n-e4b-it:free"
-MAX_STEPS = 7  # Limit to first 7 steps
+MAX_STEPS = 1000  # Limit to 1000 steps (effectively all)
 # ---------------------
 
 NAMESPACES = {
@@ -101,7 +101,7 @@ class AIHelper:
                 # Try to read error body for more info
                 try:
                     error_body = e.read().decode('utf-8')
-                    print(f"DEBUG: {error_body}") 
+                    # print(f"DEBUG: {error_body}") 
                 except:
                     pass
                 return f"(AI Error: HTTP {e.code})"
@@ -114,6 +114,7 @@ class CPIFlowAnalyzer:
         self.xml_content = None
         self.root = None
         self.elements = {}
+        self.adapter_configs = {}  # Map node_id -> adapter properties
         self.step_counter = 0
         self.zip_file = None
         self.ai = AIHelper(API_KEY)
@@ -137,6 +138,16 @@ class CPIFlowAnalyzer:
 
     def _parse_elements(self):
         """Map all BPMN elements"""
+        # 1. Parse Message Flows (Adapters) first to link them to nodes
+        for mf in self.root.findall('.//bpmn2:messageFlow', NAMESPACES):
+            props = self._get_ifl_properties(mf)
+            source = mf.get('sourceRef')
+            target = mf.get('targetRef')
+            # Map both directions so we find it whether it's outgoing or incoming
+            if source: self.adapter_configs[source] = props
+            if target: self.adapter_configs[target] = props
+
+        # 2. Parse Nodes
         for elem in self.root.findall('.//*[@id]'):
             elem_id = elem.get('id')
             tag = elem.tag.split('}')[-1]
@@ -205,6 +216,10 @@ class CPIFlowAnalyzer:
                 return "XML Modifier"
             if activity_type == 'ProcessCallElement':
                 return "Process Call"
+            if activity_type == 'Filter':
+                return "Filter"
+            if activity_type == 'DBStorage':
+                return "Data Store"
         
         if tag == 'serviceTask':
             if activity_type == 'ExternalCall':
@@ -213,6 +228,8 @@ class CPIFlowAnalyzer:
                 return "Content Enricher"
             if activity_type == 'Send':
                 return "Send"
+            if activity_type == 'DBStorage':
+                return "Data Store"
 
         if 'Gateway' in tag:
             return "Router"
@@ -251,6 +268,7 @@ class CPIFlowAnalyzer:
         name = node['name']
         props = node['props']
         n_type = node['type']
+        node_id = node['id']
         
         ai_summary = ""
         
@@ -271,16 +289,28 @@ class CPIFlowAnalyzer:
             config_dump = f"Property Table: {props.get('propertyTable', '')}\nHeader Table: {props.get('headerTable', '')}"
             ai_summary = self.ai.generate_summary("Content Modifier Configuration", config_dump)
 
-        # 3. REQUEST REPLY / EXTERNAL CALL
-        elif n_type == 'Request Reply' or n_type == 'Content Enricher':
-            # Dump adapter properties
-            adapter_dump = json.dumps(props, indent=2)
+        # 3. REQUEST REPLY / EXTERNAL CALL / CONTENT ENRICHER / SEND
+        elif n_type in ['Request Reply', 'Content Enricher', 'Send']:
+            # Fetch adapter properties from Message Flow linkage
+            adapter_props = self.adapter_configs.get(node_id, {})
+            
+            # Combine node properties with adapter properties for context
+            full_props = {**props, **adapter_props}
+            adapter_dump = json.dumps(full_props, indent=2)
+            
             ai_summary = self.ai.generate_summary("Integration Adapter Configuration", adapter_dump)
             
         # 4. MAPPING
         elif "Mapping" in n_type:
             map_name = props.get('mappingname', 'Mapping')
             ai_summary = self.ai.generate_summary("Mapping Name context", f"Mapping Name: {map_name}. This is a transformation step.")
+
+        # 5. CATCH-ALL (Process Calls, Data Stores, Filters, Splitters, etc.)
+        elif n_type not in ["Router", "End", "Start"]:
+            # For anything else, dump all attributes/properties to AI
+            # This covers Process Calls, Data Stores, Filters, etc.
+            config_dump = json.dumps(props, indent=2)
+            ai_summary = self.ai.generate_summary(f"{n_type} Configuration", config_dump)
 
         return ai_summary
 
@@ -328,10 +358,22 @@ class CPIFlowAnalyzer:
             
             print("-" * 40)
 
-            # Move next (Simple linear logic for demo)
+            # Move next with SMART HEURISTIC
             if node['outgoing']:
-                # Prefer 'Main' path if multiple (heuristic)
-                curr_id = node['outgoing'][0]['target']
+                outgoing_links = node['outgoing']
+                
+                # Default: Pick the first one
+                next_id = outgoing_links[0]['target']
+                
+                # Heuristic: If multiple paths (e.g., Router), prefer the one that DOES NOT go to 'End'
+                if len(outgoing_links) > 1:
+                    for link in outgoing_links:
+                        target_node = self.elements.get(link['target'])
+                        if target_node and target_node['type'] != 'End':
+                            next_id = link['target']
+                            break  # Found a path that continues!
+                
+                curr_id = next_id
             else:
                 curr_id = None
 
