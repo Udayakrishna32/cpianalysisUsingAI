@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 SAP CPI AI Explainer - RAG Generator
-1. PASS 1: Step-by-step AI analysis.
-2. PASS 2: Architectural grouping.
+1. PASS 1: Step-by-step AI analysis using a fast model (e.g., llama3.1).
+2. PASS 2: Architectural grouping using a reasoning model (e.g., qwen3).
 3. OUTPUT: Generates a structured JSON file for RAG training.
 """
 
@@ -31,12 +31,32 @@ for prefix, uri in NAMESPACES.items():
     ET.register_namespace(prefix, uri)
 
 # --- PROMPTS ---
-ARCHITECT_SYSTEM_PROMPT = """You are a senior SAP CPI Integration Architect.
-You explain integration flows at ARCHITECTURE level in 2-5 lines, not step-by-step.
-You group steps into logical phases, explain data flow in 2-5 lines, dependencies in 2-5 lines, and business intent in 2-5 lines.
-You explicitly call out core business logic, validations, and decision points.
-You avoid generic descriptions and ignore obvious boilerplate steps.
-You are concise in 2-5 lines, structured, and opinionated."""
+ARCHITECT_SYSTEM_PROMPT = """You are an SAP CPI Integration Architect.
+
+Your task is to generate a HIGH-QUALITY INTEGRATION DESCRIPTION based on the steps and
+that will be used for semantic search and retrieval.
+
+STRICT RULES:
+- Output ONLY the description.
+- Do NOT list steps or phases.
+- Do NOT explain implementation details.
+- Do NOT speculate or add business justification.
+- Do NOT use generic phrases like “various processing” or “further handling”.
+
+WHAT TO INCLUDE:
+- Source system(s)
+- Target system(s)
+- Type of data exchanged
+- Key technical behaviors (e.g., scheduled, event-driven, conditional, enrichment)
+- Any notable constraints or patterns (e.g., routing, transformation, validation)
+
+STYLE:
+- 2–5 concise sentences.
+- Technical, concrete, and factual.
+- Optimized for semantic similarity, not human storytelling.
+
+OUTPUT FORMAT:
+- Plain text only. No headings. No bullet points."""
 
 class AIHelper:
     def __init__(self):
@@ -51,7 +71,7 @@ class AIHelper:
             "model": STEP_MODEL,
             "stream": False,
             "messages": [
-                {"role": "system", "content": "You are a concise SAP CPI expert. Summarize the logic in ONE to three simple sentence. Do not miss details like fields , query , logic and other things used. Just say what it does."},
+                {"role": "system", "content": "Tell in 2-4 lines only:- Clearly state what the step does there.- Mention important fields, expressions, endpoints, or conditions if present."},
                 {"role": "user", "content": prompt}
             ]
         }
@@ -61,14 +81,23 @@ class AIHelper:
         """Pass 2: Group the summarized flow into architectural phases."""
         prompt = (
             "Analyze the following SAP CPI iFlow.\n\n"
-            "Requirements:\n"
-            "1. Group the steps into logical ARCHITECTURAL PHASES.\n"
-            "2. Give each phase a clear purpose (why it exists) in 2-5 lines.\n"
-            "3. Explain how data flows between phases in 2-5 lines.\n"
-            "4. Call out which phase contains CORE BUSINESS LOGIC in 2-5 lines.\n"
-            "5. Identify important validations and routing decisions in 2-5 lines.\n"
-            "6. Mention any redundant or low-value steps.\n"
-            "7. Provide a short “mental model” of the overall flow.\n\n"
+    "Task:\n"
+    "Generate a concise, high-quality INTEGRATION DESCRIPTION based on the steps provided,\n"
+    "that can be used for semantic search (RAG).\n\n"
+    "Rules:\n"
+    "- Output ONLY the description.\n"
+    "- Do NOT list steps or phases.\n"
+    "- Do NOT speculate about business intent.\n"
+    "- Do NOT use generic phrases (e.g., 'various processing').\n"
+    "- Be concrete and technical.\n\n"
+    "Include:\n"
+    "- Source system(s)\n"
+    "- Target system(s)\n"
+    "- Type of data exchanged\n"
+    "- Key technical behaviors (scheduled, conditional, enrichment, routing, transformation)\n\n"
+    "Style:\n"
+    "- 2 to 4 sentences.\n"
+    "- Plain text only.\n\n"
             f"iFlow steps:\n{full_flow_text}"
         )
         
@@ -98,7 +127,6 @@ class AIHelper:
 
 class CPIFlowAnalyzer:
     def __init__(self, zip_path):
-        # FIX: Ensure zip_path is a Path object immediately
         self.zip_path = Path(zip_path)
         self.xml_content = None
         self.root = None
@@ -109,7 +137,7 @@ class CPIFlowAnalyzer:
         self.zip_file = None
         self.ai = AIHelper()
         self.rag_data = {
-            "iflow_file": self.zip_path.name,  # Now safe because self.zip_path is a Path object
+            "iflow_file": self.zip_path.name,
             "steps": [],
             "architectural_analysis": ""
         }
@@ -256,11 +284,23 @@ class CPIFlowAnalyzer:
 
         print(f"🚀 PASS 1: Analyzing steps one-by-one ({STEP_MODEL})...")
         
+        # Using a stack for Depth-First Traversal (to cover all branches)
+        # Each item is (node_id)
+        # We also need a way to order them roughly sequentially for the report, 
+        # but DFS naturally follows flow.
+        
+        # NOTE: For RAG purposes, a simple linear walk of the main path + side paths is okay.
+        # But a true graph walk is safer to not miss detached ends.
+        # Let's stick to the queue/stack based traversal we discussed.
+        
+        queue = [curr]
         visited = set()
         functional_summaries = []
         
-        while curr and self.step_counter < MAX_STEPS:
-            if curr in visited: break
+        while queue and self.step_counter < MAX_STEPS:
+            curr = queue.pop(0) # BFS style (Process level by level-ish)
+            
+            if curr in visited: continue
             visited.add(curr)
             
             node = self.elements[curr]
@@ -278,28 +318,19 @@ class CPIFlowAnalyzer:
             summary_text = f"Step {self.step_counter}: {node['name']} ({node['type']}) -> {summary}"
             functional_summaries.append(summary_text)
             
-            # Add to Structured Data
+            # Add to Structured Data (SIMPLIFIED AS REQUESTED)
             self.rag_data["steps"].append({
                 "step_number": self.step_counter,
-                "name": node['name'],
                 "type": node['type'],
-                "technical_data": tech_data,
                 "ai_summary": summary
             })
 
-            # Move next
+            # Move next (Find all children)
             if node['outgoing']:
-                links = node['outgoing']
-                nxt = links[0]['target']
-                if len(links) > 1:
-                    for l in links:
-                        t = self.elements.get(l['target'])
-                        if t and t['type'] != 'End':
-                            nxt = l['target']
-                            break
-                curr = nxt
-            else:
-                curr = None
+                for link in node['outgoing']:
+                    target_id = link['target']
+                    if target_id not in visited:
+                        queue.append(target_id)
 
         print(f"\n🚀 PASS 2: Sending aggregated flow to Architect ({ARCHITECT_MODEL})...")
         full_context = "\n".join(functional_summaries)
