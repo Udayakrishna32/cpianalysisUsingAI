@@ -22,6 +22,9 @@
         .bubble { max-width: 85%; padding: 0.75rem 1rem; border-radius: 1rem; font-size: 0.875rem; line-height: 1.25rem; word-wrap: break-word; }
         .bubble-ai { align-self: flex-start; background-color: #f1f5f9; color: #1e293b; border: 1px solid #e2e8f0; }
         .bubble-user { align-self: flex-end; background-color: #2563eb; color: white; }
+        .error-toast { background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; padding: 8px; border-radius: 8px; font-size: 10px; margin-bottom: 8px; }
+        @keyframes pulse-blue { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .loading-pulse { animation: pulse-blue 1.5s infinite; }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen p-4 md:p-6 text-slate-900">
@@ -33,26 +36,29 @@
                 <p class="text-slate-500 font-medium italic">Multi-Source Discovery & OpenRouter Reasoning</p>
             </div>
             <div class="flex gap-3">
+                <div id="dbStatusIndicator" class="bg-slate-200 text-slate-600 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-slate-300 flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full bg-slate-400"></span> DB Initializing...
+                </div>
                 <button id="clearDbBtn" class="bg-white text-red-500 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-red-100 hover:bg-red-50 transition-colors">Wipe All Data</button>
-                <div class="bg-emerald-100 text-emerald-800 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-emerald-200">Local Vectorizer Active</div>
             </div>
         </header>
 
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
             
-            <!-- STAGE 1: KNOWLEDGE BASE & STORAGE MANAGER -->
+            <!-- STAGE 1: KNOWLEDGE BASE -->
             <section class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[750px]">
                 <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
                     <span class="w-7 h-7 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-bold">1</span>
                     Manage Knowledge
                 </h2>
                 
+                <div id="uploadErrorArea"></div>
+
                 <input type="file" id="jsonInput" class="hidden" accept=".json" multiple>
                 <button onclick="document.getElementById('jsonInput').click()" class="w-full py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-all mb-4 active:scale-95 shadow-md">
                     Upload JSON Files
                 </button>
 
-                <!-- Storage Statistics -->
                 <div class="grid grid-cols-2 gap-2 mb-4">
                     <div class="p-2 bg-slate-50 rounded-lg border border-slate-100 text-center">
                         <p id="iflowCount" class="text-lg font-black text-blue-600">0</p>
@@ -64,7 +70,6 @@
                     </div>
                 </div>
 
-                <!-- Active Storage List -->
                 <div class="mb-2 flex justify-between items-center">
                     <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-widest">In Vector Storage</h3>
                     <button onclick="updateStorageList()" class="text-[10px] text-blue-500 font-bold hover:underline">Refresh</button>
@@ -73,14 +78,13 @@
                     <p class="text-slate-300 italic text-center py-10 text-[10px]">Database empty...</p>
                 </div>
 
-                <!-- Chunk Preview (Temporary) -->
                 <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 border-t pt-4">Upload Preview</h3>
                 <div id="chunkPreview" class="h-32 overflow-y-auto space-y-1 pr-1 text-[9px]">
                     <p class="text-slate-300 italic text-center py-4">No pending uploads...</p>
                 </div>
             </section>
 
-            <!-- STAGE 2: AI CONFIG & VECTOR ENGINE -->
+            <!-- STAGE 2: AI CONFIG -->
             <section class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[750px]">
                 <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
                     <span class="w-7 h-7 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold">2</span>
@@ -96,7 +100,6 @@
                         <label class="text-[9px] font-bold text-indigo-400 uppercase">Model Name</label>
                         <input type="text" id="apiConfigModel" placeholder="xiaomi/mimo-v2-flash:free" class="w-full text-xs p-2 rounded border-none outline-none focus:ring-1 ring-indigo-400">
                     </div>
-                    <p class="text-[9px] text-indigo-400 italic">Settings saved automatically to local storage.</p>
                 </div>
 
                 <button id="embedBtn" disabled class="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-30 transition-all mb-4">
@@ -150,7 +153,7 @@
                         <div id="chatContextStatus" class="text-[9px] text-slate-400 font-bold uppercase truncate px-2">Grounding: None</div>
                         <div class="flex gap-2">
                             <input type="text" id="chatInput" placeholder="Ask about logic or changes..." class="flex-grow p-3 border border-slate-200 rounded-xl text-xs outline-none focus:border-blue-500" disabled>
-                            <button id="chatSendBtn" class="bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 disabled:opacity-50" disabled>Send</button>
+                            <button id="chatSendBtn" class="bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 disabled:opacity-50 transition-all" disabled>Send</button>
                         </div>
                     </div>
                 </div>
@@ -168,8 +171,6 @@
         
         const DB_NAME = "CPI_RAG_DATABASE_V5";
         const STORE_NAME = "vectors";
-
-        // Persistent Config Keys
         const STORAGE_KEY_API = "cpi_rag_openrouter_key";
         const STORAGE_KEY_MODEL = "cpi_rag_openrouter_model";
 
@@ -184,11 +185,19 @@
                 };
                 request.onsuccess = (e) => {
                     db = e.target.result;
+                    const indicator = document.getElementById('dbStatusIndicator');
+                    indicator.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-500"></span> DB Ready';
+                    indicator.className = "bg-emerald-50 text-emerald-600 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-emerald-100 flex items-center gap-2";
                     updateStats();
                     updateStorageList();
                     resolve();
                 };
-                request.onerror = (e) => reject(e);
+                request.onerror = (e) => {
+                    const indicator = document.getElementById('dbStatusIndicator');
+                    indicator.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-500"></span> DB Error';
+                    indicator.className = "bg-red-50 text-red-600 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-red-100 flex items-center gap-2";
+                    reject(e);
+                };
             });
         }
 
@@ -251,15 +260,28 @@
             };
         }
 
-        // --- STAGE 1 LOGIC ---
+        function showUploadError(msg) {
+            const area = document.getElementById('uploadErrorArea');
+            const div = document.createElement('div');
+            div.className = 'error-toast';
+            div.innerHTML = `<strong>Error:</strong> ${msg}`;
+            area.appendChild(div);
+            setTimeout(() => div.remove(), 5000);
+        }
+
+        // --- STAGE 1 ---
         document.getElementById('jsonInput').addEventListener('change', async (e) => {
             const files = Array.from(e.target.files);
+            if (files.length === 0) return;
+            
             chunksToProcess = [];
+            const previewContainer = document.getElementById('chunkPreview');
+            previewContainer.innerHTML = `<p class="text-center py-4 text-blue-500 animate-pulse">Processing files...</p>`;
             
             for (let file of files) {
                 try {
                     const text = await file.text();
-                    const data = JSON.parse(text);
+                    let data = JSON.parse(text);
                     const sourceId = data.iflow_file || file.name;
 
                     if (data.architectural_analysis) {
@@ -270,21 +292,23 @@
                             text: `[Source: ${sourceId}] ARCHITECTURE: ${data.architectural_analysis}` 
                         });
                     }
-                    data.steps.forEach(step => {
-                        chunksToProcess.push({ 
-                            id: `STEP_${step.step_number}`, 
-                            source_id: sourceId, 
-                            type: step.type, 
-                            text: `[Source: ${sourceId}] STEP ${step.step_number} (${step.type}): ${step.ai_summary}`,
-                            step_num: step.step_number
+                    if (data.steps && Array.isArray(data.steps)) {
+                        data.steps.forEach(step => {
+                            chunksToProcess.push({ 
+                                id: `STEP_${step.step_number}`, 
+                                source_id: sourceId, 
+                                type: step.type || 'Unknown', 
+                                text: `[Source: ${sourceId}] STEP ${step.step_number} (${step.type}): ${step.ai_summary || 'No summary'}`,
+                                step_num: step.step_number
+                            });
                         });
-                    });
+                    }
                 } catch (err) {
-                    console.error("File Read Error:", err);
+                    showUploadError(`Could not read "${file.name}": ${err.message}`);
                 }
             }
 
-            document.getElementById('chunkPreview').innerHTML = chunksToProcess.map(c => 
+            previewContainer.innerHTML = chunksToProcess.map(c => 
                 `<div class="p-1.5 bg-slate-50 border rounded border-slate-200 mb-1 opacity-70">
                     <span class="font-bold text-blue-600 text-[8px] uppercase">${c.id}</span>
                     <p class="truncate text-[8px]">${c.source_id}</p>
@@ -293,7 +317,7 @@
             document.getElementById('embedBtn').disabled = false;
         });
 
-        // --- STAGE 2 LOGIC ---
+        // --- STAGE 2 ---
         document.getElementById('embedBtn').addEventListener('click', async () => {
             const btn = document.getElementById('embedBtn');
             const progressArea = document.getElementById('progressArea');
@@ -306,7 +330,7 @@
             
             try {
                 if (!extractor) {
-                    progressText.innerText = "Downloading Model...";
+                    progressText.innerText = "Loading AI Model...";
                     extractor = await window.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
                 }
                 
@@ -341,10 +365,11 @@
                 chunksToProcess = [];
             } catch (err) {
                 console.error(err);
+                showUploadError(`Vectorization Error: ${err.message}`);
             }
         });
 
-        // --- STAGE 3 LOGIC ---
+        // --- STAGE 3 ---
         async function performSearch() {
             const query = document.getElementById('searchInput').value.trim();
             if (!query || !extractor) return;
@@ -386,14 +411,13 @@
 
                 renderFullFlow(fullFlow, bestMatch.score);
                 
-                // Set Chat Context
                 activeContextText = fullFlow.map(f => `${f.id}: ${f.text}`).join("\n");
                 document.getElementById('chatContextStatus').innerText = `Context: ${bestMatch.source_id}`;
                 document.getElementById('chatInput').disabled = false;
                 document.getElementById('chatSendBtn').disabled = false;
                 
                 chatHistory = [];
-                document.getElementById('chatMessages').innerHTML = `<div class="bubble bubble-ai">I've retrieved <b>${fullFlow.length}</b> logic nodes for ${bestMatch.source_id}. Ready for consultation.</div>`;
+                document.getElementById('chatMessages').innerHTML = `<div class="bubble bubble-ai">Loaded <b>${fullFlow.length}</b> nodes for ${bestMatch.source_id}. You can now send questions in Stage 4.</div>`;
             };
         }
 
@@ -431,28 +455,37 @@
             container.scrollTop = 0;
         }
 
-        // --- STAGE 4 LOGIC ---
+        // --- STAGE 4 ---
         async function sendChatMessage() {
             const input = document.getElementById('chatInput');
+            const btn = document.getElementById('chatSendBtn');
             const query = input.value.trim();
             const apiKey = document.getElementById('apiConfigKey').value.trim();
             const model = document.getElementById('apiConfigModel').value.trim();
 
-            if (!query || !activeContextText) return;
+            if (!query) return;
+            
+            if (!activeContextText) {
+                addBubble("⚠️ Error: No iFlow context selected. Please find an iFlow in Stage 3 first.", 'ai');
+                return;
+            }
+
             if (!apiKey) {
-                alert("Please provide an OpenRouter API Key in Stage 2.");
+                addBubble("⚠️ Error: Missing OpenRouter API Key in Stage 2 configuration.", 'ai');
                 return;
             }
 
             addBubble(query, 'user');
             input.value = "";
-            const thinkingId = addBubble("OpenRouter Thinking...", 'ai');
+            btn.disabled = true;
+            btn.innerText = "...";
+            const thinkingId = addBubble("<span class='loading-pulse'>OpenRouter Thinking...</span>", 'ai');
 
             const systemPrompt = `You are a professional SAP CPI Architect. 
             CONTEXT:
             ${activeContextText}
             
-            Use the context above to explain implementation details or proposed changes. Refer to STEP numbers.`;
+            Use the context above to answer technical questions or logic changes. Reference STEP numbers.`;
 
             const messages = [
                 { role: 'system', content: systemPrompt },
@@ -470,7 +503,10 @@
                     body: JSON.stringify({ model: model, messages: messages })
                 });
 
-                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                if (!response.ok) {
+                    const errRes = await response.json();
+                    throw new Error(errRes.error?.message || `API Status ${response.status}`);
+                }
 
                 const result = await response.json();
                 const aiResponse = result.choices[0].message.content;
@@ -483,7 +519,10 @@
 
             } catch (err) {
                 console.error(err);
-                updateBubble(thinkingId, `<span class="text-red-500 font-bold">Error:</span> ${err.message}`);
+                updateBubble(thinkingId, `<span class="text-red-500 font-bold">API Failure:</span> ${err.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Send";
             }
         }
 
@@ -493,7 +532,7 @@
             const div = document.createElement('div');
             div.id = id;
             div.className = `bubble bubble-${role}`;
-            div.innerHTML = text.replace(/\n/g, '<br>');
+            div.innerHTML = text;
             container.appendChild(div);
             container.scrollTop = container.scrollHeight;
             return id;
@@ -508,7 +547,6 @@
             container.scrollTop = container.scrollHeight;
         }
 
-        // --- GLOBAL & STORAGE HELPERS ---
         function setupConfig() {
             const savedKey = localStorage.getItem(STORAGE_KEY_API);
             const savedModel = localStorage.getItem(STORAGE_KEY_MODEL);
@@ -535,6 +573,7 @@
                 updateStats();
                 updateStorageList();
                 document.getElementById('searchResults').innerHTML = `<p class="text-center text-xs text-slate-400">Database wiped.</p>`;
+                document.getElementById('chatMessages').innerHTML = `<div class="bubble bubble-ai">Database wiped. Identify an iFlow to restart.</div>`;
             };
         });
 
@@ -543,7 +582,6 @@
             setupConfig();
         };
 
-        // Export for global access via onclick
         window.deleteSource = deleteSource;
         window.updateStorageList = updateStorageList;
 
