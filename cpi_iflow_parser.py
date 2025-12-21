@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 SAP CPI AI Explainer - Batch Processor
-1. Processes multiple ZIP files provided as arguments.
-2. Uses DeepSeek API for step-by-step analysis and architectural summary.
-3. Outputs: iflow_analysis_for_<filename>.json for each input.
+Implementation: Stack-based Recursive Traversal
+1. Starts at Participant_Process_1, explicitly avoiding Exception SubProcesses for the entry point.
+2. Follows ordered branches in Sequential Multicasts.
+3. Jumps into Local Processes via Process Calls and returns upon 'End' event.
+4. Uses DeepSeek API for step-by-step and architectural analysis.
 """
 
 import zipfile
@@ -13,14 +15,14 @@ import json
 import time
 import urllib.request
 import urllib.error
+import re
 from pathlib import Path
 
 # --- CONFIGURATION ---
-# The dummy key provided in the request
 DEEPSEEK_API_KEY = "sk-f7d101c4a97246318ab270f5d67abfdd"
 API_URL = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-chat"
-MAX_STEPS = 500  # Safety limit for steps per iFlow
+MAX_STEPS = 1500 
 
 NAMESPACES = {
     'bpmn2': 'http://www.omg.org/spec/BPMN/20100524/MODEL',
@@ -31,25 +33,17 @@ for prefix, uri in NAMESPACES.items():
 
 # --- PROMPTS ---
 ARCHITECT_SYSTEM_PROMPT = """You are an SAP CPI Integration Architect.
-Your task is to generate a HIGH-QUALITY INTEGRATION DESCRIPTION based on all the steps we analyzed.
+Your task is to generate a HIGH-QUALITY INTEGRATION DESCRIPTION based on the steps provided.
 This will be used for semantic search and retrieval (RAG).
 
 STRICT RULES:
 - Output ONLY the description.
-- Do NOT list steps or phases.
-- Do NOT explain implementation details.
-- Do NOT speculate or add business justification.
-- Do NOT use generic phrases like "various processing".
-
-WHAT TO INCLUDE:
-- Source and Target system(s).
-- Type of data exchanged.
-- Key technical behaviors (scheduled, event-driven, routing, transformation).
+- Be concrete, technical, and factual.
+- Describe the end-to-end data flow from source to target.
 
 STYLE:
 - 2–4 concise sentences.
-- , concrete, and factual.
-- Plain text only."""
+- Plain text only. No bullet points."""
 
 class DeepSeekAIHelper:
     def __init__(self, api_key):
@@ -63,7 +57,6 @@ class DeepSeekAIHelper:
             "stream": False
         }
         
-        # Exponential Backoff Implementation
         max_retries = 5
         for i in range(max_retries):
             try:
@@ -79,31 +72,25 @@ class DeepSeekAIHelper:
                     result = json.loads(response.read().decode('utf-8'))
                     return result["choices"][0]["message"]["content"].strip()
             except urllib.error.HTTPError as e:
-                if e.code == 429:  # Rate limit
+                if e.code == 429:
                     wait = 2 ** i
                     time.sleep(wait)
                     continue
-                return f"(API Error: {e.code} - {e.reason})"
+                return f"(API Error: {e.code})"
             except Exception as e:
-                return f"(Connection Error: {str(e)})"
+                return f"(Error: {str(e)})"
         return "(Error: Max retries exceeded)"
 
-    def get_step_summary(self, context, data):
-        if not data: return "Standard processing step."
-
-        system_msg = "You are a concise SAP CPI expert. Summarize this step and tell what we did exactly in this step with in 1-3 lines. u can mention any fields/variables/or any we used in this in summary."
-        user_msg = f"Explain this '{context}' step. TECHNICAL DATA:\n{data}"
-        
-        messages = [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg}
-        ]
+    def get_step_summary(self, context, data, process_name):
+        system_msg = f"You are an SAP CPI expert. Briefly explain what this step does within the context of the '{process_name}' process. 1-2 sentences max."
+        user_msg = f"Step Type: {context}\nTechnical Data:\n{data}"
+        messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}]
         return self._call_api(messages)
 
     def get_architectural_analysis(self, full_flow_text):
         messages = [
             {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Analyze the following SAP CPI iFlow steps and provide the architectural description:\n\n{full_flow_text}"}
+            {"role": "user", "content": f"Summarize this iFlow logic:\n\n{full_flow_text}"}
         ]
         return self._call_api(messages)
 
@@ -114,10 +101,14 @@ class CPIFlowAnalyzer:
         self.xml_content = None
         self.root = None
         self.elements = {}
+        self.processes = {} # pid -> {start, name, type}
         self.adapter_configs = {} 
         self.parameters = {}       
         self.step_counter = 0
         self.zip_file = None
+        self.main_process_id = None
+        self.visited_nodes = set()
+        self.functional_summaries = []
         self.rag_data = {
             "iflow_file": self.zip_path.name,
             "steps": [],
@@ -128,18 +119,16 @@ class CPIFlowAnalyzer:
         try:
             self.zip_file = zipfile.ZipFile(self.zip_path, 'r')
             self._load_parameters()
-            # Find the core integration flow XML
-            candidates = [f for f in self.zip_file.namelist() if f.endswith('.iflw') and 'integrationflow' in f.lower()]
-            if not candidates:
-                print(f"  [!] No .iflw file found in {self.zip_path.name}")
-                return False
-            with self.zip_file.open(candidates[0]) as f:
+            candidates = [f for f in self.zip_file.namelist() if f.endswith('.iflw')]
+            if not candidates: return False
+            iflow_file = next((c for c in candidates if 'integrationflow' in c.lower()), candidates[0])
+            with self.zip_file.open(iflow_file) as f:
                 self.xml_content = f.read()
             self.root = ET.fromstring(self.xml_content)
             self._parse_elements()
             return True
         except Exception as e:
-            print(f"  [!] Error loading {self.zip_path.name}: {e}")
+            print(f"  [!] Load Error: {e}")
             return False
 
     def _load_parameters(self):
@@ -154,164 +143,203 @@ class CPIFlowAnalyzer:
                         self.parameters[k.strip()] = v.strip()
         except: pass
 
-    def _resolve_placeholders(self, props):
-        res = {}
-        for k, v in props.items():
-            if isinstance(v, str) and '{{' in v:
-                clean = v.replace('{{', '').replace('}}', '').strip()
-                res[k] = self.parameters.get(clean, v)
-            else:
-                res[k] = v
-        return res
+    def _resolve(self, val):
+        if isinstance(val, str) and '{{' in val:
+            clean = val.replace('{{', '').replace('}}', '').strip()
+            return self.parameters.get(clean, val)
+        return val
 
     def _parse_elements(self):
-        # Parse Message Flows (Adapters)
+        # 1. Map Participants
+        process_map = {}
+        for part in self.root.findall('.//bpmn2:collaboration/bpmn2:participant', NAMESPACES):
+            ref = part.get('processRef')
+            ptype = part.get('ifl:type')
+            if part.get('id') == "Participant_Process_1":
+                self.main_process_id = ref
+            if ref: process_map[ref] = (ptype, part.get('name'))
+
+        # 2. Map Message Flows (Adapters)
         for mf in self.root.findall('.//bpmn2:messageFlow', NAMESPACES):
-            props = self._get_ifl_properties(mf)
-            props = self._resolve_placeholders(props)
+            props = {k: self._resolve(v) for k, v in self._get_props(mf).items()}
             s, t = mf.get('sourceRef'), mf.get('targetRef')
             if s: self.adapter_configs[s] = props
             if t: self.adapter_configs[t] = props
 
-        # Parse BPMN Elements
-        for elem in self.root.findall('.//*[@id]'):
-            eid = elem.get('id')
-            tag = elem.tag.split('}')[-1]
-            props = self._get_ifl_properties(elem)
-            props = self._resolve_placeholders(props)
-            self.elements[eid] = {
-                'id': eid,
-                'name': elem.get('name', ''),
-                'tag': tag,
-                'type': self._determine_readable_type(elem, tag, props),
-                'props': props,
-                'outgoing': []
-            }
+        # 3. Parse Processes
+        for process in self.root.findall('.//bpmn2:process', NAMESPACES):
+            pid = process.get('id')
+            ptype, pname = process_map.get(pid, ("Local", process.get('name')))
             
-        # Map connections
-        for sf in self.root.findall('.//bpmn2:sequenceFlow', NAMESPACES):
-            s, t = sf.get('sourceRef'), sf.get('targetRef')
-            if s in self.elements and t in self.elements:
-                self.elements[s]['outgoing'].append({'target': t})
+            # Identify the CORRECT start node (Avoid Error Starts for the main entry)
+            starts = process.findall('.//bpmn2:startEvent', NAMESPACES)
+            best_start = None
+            for s in starts:
+                # Prioritize Timer or standard starts
+                if s.find('.//bpmn2:errorEventDefinition', NAMESPACES) is not None:
+                    continue
+                best_start = s.get('id')
+                if s.find('.//bpmn2:timerEventDefinition', NAMESPACES) is not None:
+                    break # Timer is usually the main entry if present
+            
+            self.processes[pid] = {
+                'start': best_start,
+                'name': pname,
+                'type': ptype
+            }
 
-    def _get_ifl_properties(self, elem):
+            for elem in process.findall('.//*[@id]'):
+                eid = elem.get('id')
+                tag = elem.tag.split('}')[-1]
+                if tag in ['sequenceFlow', 'incoming', 'outgoing']: continue
+                
+                props = {k: self._resolve(v) for k, v in self._get_props(elem).items()}
+                self.elements[eid] = {
+                    'id': eid,
+                    'name': elem.get('name', '') or eid,
+                    'tag': tag,
+                    'process_id': pid,
+                    'process_name': pname,
+                    'type': self._determine_type(elem, tag, props),
+                    'props': props,
+                    'outgoing': []
+                }
+            
+            for sf in process.findall('.//bpmn2:sequenceFlow', NAMESPACES):
+                s, t = sf.get('sourceRef'), sf.get('targetRef')
+                if s in self.elements and t in self.elements:
+                    cond = sf.find('.//bpmn2:conditionExpression', NAMESPACES)
+                    self.elements[s]['outgoing'].append({
+                        'target': t, 
+                        'condition': cond.text if cond is not None else "",
+                        'sf_id': sf.get('id')
+                    })
+
+    def _get_props(self, elem):
         props = {}
-        for child in elem.iter():
-            if child.tag.endswith('property'):
+        for prop in elem.iter():
+            if prop.tag.endswith('property'):
                 k, v = None, None
-                for sub in child:
+                for sub in prop:
                     if sub.tag.endswith('key'): k = sub.text
                     elif sub.tag.endswith('value'): v = sub.text
                 if k: props[k] = v
         return props
 
-    def _determine_readable_type(self, elem, tag, props):
+    def _determine_type(self, elem, tag, props):
         atype = props.get('activityType', 'Unknown')
-        if tag == 'startEvent': return "Start Timer" if elem.find('.//bpmn2:timerEventDefinition', NAMESPACES) is not None else "Start Message"
+        if tag == 'startEvent':
+            if elem.find('.//bpmn2:errorEventDefinition', NAMESPACES) is not None: return "Start Error"
+            return "Start Timer" if elem.find('.//bpmn2:timerEventDefinition', NAMESPACES) is not None else "Start Message"
         if tag == 'endEvent': return "End"
         if tag == 'callActivity':
             mapping = {'Mapping': 'Message Mapping', 'Script': 'Groovy Script', 'Enricher': 'Content Modifier', 
-                       'Splitter': 'Splitter', 'XmlModifier': 'XML Modifier', 'ProcessCallElement': 'Process Call', 
-                       'Filter': 'Filter', 'DBStorage': 'Data Store','LocIntegration Process':'Local Integration Process'}
+                       'Splitter': 'Splitter', 'ProcessCallElement': 'Process Call', 'PgpEncrypt': 'PGP Encrypt',
+                       'DBstorage': 'Data Store', 'LoopingProcess': 'Looping Process'}
             return mapping.get(atype, atype)
         if tag == 'serviceTask':
-            if atype == 'ExternalCall': return "Request Reply"
-            if atype == 'contentEnricherWithLookup': return "Content Enricher"
-            if atype == 'Send': return "Send"
-        if 'Gateway' in tag: return "Router"
-        return atype if atype != 'Unknown' else tag
+            return "Request Reply" if atype == 'ExternalCall' else "Send"
+        if 'Gateway' in tag:
+            return "Sequential Multicast" if atype == 'SequentialMulticast' else "Router"
+        return atype
 
-    def get_resource_content(self, filename):
-        if not filename: return None
-        search_paths = [f"src/main/resources/{sub}/{filename}" for sub in ['script', 'groovy', 'mapping', 'xsd']]
-        for path in search_paths:
-            try:
-                with self.zip_file.open(path) as f: return f.read().decode('utf-8', errors='ignore')
-            except KeyError: continue
-        return None
-
-    def get_step_tech_data(self, node):
+    def get_tech_data(self, node):
         props, ntype, nid = node['props'], node['type'], node['id']
         if ntype == 'Groovy Script':
-            f = props.get('script')
-            c = self.get_resource_content(f)
-            return f"Script: {f}\nCode snippet:\n{c[:400]}" if c else "Script file content missing."
+            return f"Script File: {props.get('script', 'Unknown')}"
         elif ntype == 'Content Modifier':
-            return f"Props: {props.get('propertyTable', '')}\nHeaders: {props.get('headerTable', '')}"
-        elif ntype in ['Request Reply', 'Content Enricher', 'Send']:
+            table = props.get('propertyTable', '')
+            wrap = props.get('wrapContent', '') or ""
+            return f"Logic: {table} {wrap[:200]}"
+        elif ntype in ['Request Reply', 'Send']:
             ap = self.adapter_configs.get(nid, {})
-            full = {**props, **ap}
-            return f"Adapter: {full.get('adapterId')}\nAddress: {full.get('address')}\nResource: {full.get('resourcePath')}"
-        elif "Mapping" in ntype:
-            return f"Mapping: {props.get('mappingname')}"
-        return "Generic integration step."
+            return f"Target: {ap.get('address', 'Unknown')} Path: {ap.get('resourcePath', '') or ap.get('queryOptions', '')}"
+        elif ntype in ['Process Call', 'Looping Process']:
+            return f"Target Process ID: {props.get('processId', 'Unknown')}"
+        elif ntype == 'Sequential Multicast':
+            return "Ordered Multicast Branching"
+        elif ntype == 'Data Store':
+            return f"Operation: {props.get('operation', 'Unknown')} Storage: {props.get('storageName', 'Unknown')}"
+        elif ntype == 'Router':
+            conds = [f"To {l['target']}: {l['condition']}" for l in node['outgoing'] if l['condition']]
+            return "Branch conditions: " + ("; ".join(conds) if conds else "Default route.")
+        return f"Standard {ntype} step."
 
-    def find_start_node(self):
-        for proc in self.root.findall('.//bpmn2:process', NAMESPACES):
-            start = proc.find('bpmn2:startEvent', NAMESPACES)
-            if start is not None: return start.get('id')
-        return None
-
-    def process(self):
-        curr = self.find_start_node()
-        if not curr:
-            print("  [!] Could not find start node.")
+    def trace(self, node_id):
+        """Recursive DFS tracing with Call Stack logic."""
+        if self.step_counter >= MAX_STEPS or node_id in self.visited_nodes:
             return
 
-        queue = [curr]
-        visited = set()
-        functional_summaries = []
-        
-        print(f"  [+] Analyzing steps for {self.zip_path.name}...")
-        
-        while queue and self.step_counter < MAX_STEPS:
-            curr = queue.pop(0)
-            if curr in visited or curr not in self.elements: continue
-            visited.add(curr)
-            
-            node = self.elements[curr]
-            self.step_counter += 1
-            
-            tech_data = self.get_step_tech_data(node)
-            summary = self.ai.get_step_summary(node['type'], tech_data)
-            
-            functional_summaries.append(f"Step {self.step_counter}: {node['name']} ({node['type']}) -> {summary}")
-            self.rag_data["steps"].append({
-                "step_index": self.step_counter,
-                "type": node['type'],
-                "description": summary
-            })
+        node = self.elements.get(node_id)
+        if not node: return
 
+        # Mark node as visited only if it's NOT a start node (allows re-entry to local processes)
+        if "Start" not in node['type']:
+            self.visited_nodes.add(node_id)
+
+        self.step_counter += 1
+        tech_data = self.get_tech_data(node)
+        summary = self.ai.get_step_summary(node['type'], tech_data, node['process_name'])
+        
+        print(f"    [{self.step_counter}] {node['process_name']} > {node['type']}: {node['name'][:30]}")
+
+        self.rag_data["steps"].append({
+            "step": self.step_counter,
+            "name": node['name'],
+            "type": node['type'],
+            "process": node['process_name'],
+            "description": summary
+        })
+        self.functional_summaries.append(f"{node['name']} ({node['type']}): {summary}")
+
+        # 1. HANDLE PROCESS JUMPS
+        if node['type'] in ['Process Call', 'Looping Process']:
+            sub_pid = node['props'].get('processId')
+            sub_start = self.processes.get(sub_pid, {}).get('start')
+            if sub_start:
+                self.trace(sub_start)
+
+        # 2. HANDLE BRANCHING
+        if node['type'] == 'Sequential Multicast':
+            table = node['props'].get('routingSequenceTable', '')
+            matches = re.findall(r'<cell>(\d+)</cell><cell>(SequenceFlow_\d+)</cell>', table)
+            sorted_flows = sorted(matches, key=lambda x: int(x[0]))
+            for _, sf_id in sorted_flows:
+                target = next((l['target'] for l in node['outgoing'] if l['sf_id'] == sf_id), None)
+                if target: self.trace(target)
+        else:
             for link in node['outgoing']:
-                if link['target'] not in visited:
-                    queue.append(link['target'])
+                if link['target'] not in self.visited_nodes:
+                    self.trace(link['target'])
 
-        print(f"  [+] Generating architectural summary...")
-        full_context = "\n".join(functional_summaries)
-        self.rag_data["architectural_analysis"] = self.ai.get_architectural_analysis(full_context)
+    def process(self):
+        start_node = self.processes.get(self.main_process_id, {}).get('start')
+        if not start_node:
+            print("  [!] Could not find trigger in Participant_Process_1")
+            return
+
+        print(f"  [+] Tracing execution path for {self.zip_path.name}...")
+        self.trace(start_node)
+
+        print(f"  [+] Performing architectural analysis...")
+        ctx = "\n".join(self.functional_summaries)
+        self.rag_data["architectural_analysis"] = self.ai.get_architectural_analysis(ctx)
         
-        # Determine output filename: iflow_analysis_for_<basename>.json
-        base_name = self.zip_path.stem
-        output_name = f"iflow_analysis_for_{base_name}.json"
-        
-        with open(output_name, 'w', encoding='utf-8') as f:
+        out = f"iflow_analysis_for_{self.zip_path.stem}.json"
+        with open(out, 'w', encoding='utf-8') as f:
             json.dump(self.rag_data, f, indent=4)
-        print(f"  [OK] Saved to {output_name}")
+        print(f"  [OK] Successfully analyzed {self.step_counter} steps. Output: {out}")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python cpi_batch_analyzer.py file1.zip file2.zip ...")
+        print("Usage: python cpi_batch_analyzer.py <file.zip>")
         return
-    
     ai = DeepSeekAIHelper(DEEPSEEK_API_KEY)
-    
     for zip_path in sys.argv[1:]:
-        print(f"\n--- Processing: {zip_path} ---")
+        print(f"\n--- Batch Item: {zip_path} ---")
         analyzer = CPIFlowAnalyzer(zip_path, ai)
         if analyzer.load():
             analyzer.process()
-        else:
-            print(f"  [!] Skipping {zip_path}")
 
 if __name__ == "__main__":
     main()
