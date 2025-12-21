@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CPI Architect RAG</title>
+    <title>CPI Architect RAG Pro</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
         import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
@@ -11,97 +11,148 @@
         env.allowLocalModels = false;
     </script>
     <style>
-        .vector-preview { font-family: 'Courier New', Courier, monospace; letter-spacing: -0.5px; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: #f1f5f9; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         .retrieved-step { border-left: 4px solid #cbd5e1; background: #fff; transition: all 0.2s; }
         .arch-match-header { background: linear-gradient(135deg, #1e293b, #334155); color: white; border-radius: 12px; }
         .step-bubble { border-left: 3px solid #3b82f6; background: #f8fafc; }
+        .chat-container { height: 450px; display: flex; flex-direction: column; }
+        .chat-messages { flex-grow: 1; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
+        .bubble { max-width: 85%; padding: 0.75rem 1rem; border-radius: 1rem; font-size: 0.875rem; line-height: 1.25rem; word-wrap: break-word; }
+        .bubble-ai { align-self: flex-start; background-color: #f1f5f9; color: #1e293b; border: 1px solid #e2e8f0; }
+        .bubble-user { align-self: flex-end; background-color: #2563eb; color: white; }
     </style>
 </head>
-<body class="bg-slate-50 min-h-screen p-4 md:p-8 text-slate-900">
+<body class="bg-slate-50 min-h-screen p-4 md:p-6 text-slate-900">
 
-    <div class="max-w-7xl mx-auto">
-        <header class="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+    <div class="max-w-[1700px] mx-auto">
+        <header class="mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
-                <h1 class="text-3xl font-black text-slate-900 tracking-tight">CPI RAG <span class="text-blue-600">Architect</span></h1>
-                <p class="text-slate-500 font-medium italic">Logic: Search Architecture → Retrieve Full iFlow</p>
+                <h1 class="text-3xl font-black text-slate-900 tracking-tight">CPI RAG <span class="text-blue-600">Architect Pro</span></h1>
+                <p class="text-slate-500 font-medium italic">Multi-Source Discovery & OpenRouter Reasoning</p>
             </div>
-            <div class="flex gap-2">
-                <button id="clearDbBtn" class="bg-white text-red-500 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-red-100 hover:bg-red-50 transition-colors">Wipe DB</button>
-                <div class="bg-emerald-100 text-emerald-800 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-emerald-200">Local Model: all-MiniLM-L6-v2</div>
+            <div class="flex gap-3">
+                <button id="clearDbBtn" class="bg-white text-red-500 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-red-100 hover:bg-red-50 transition-colors">Wipe All Data</button>
+                <div class="bg-emerald-100 text-emerald-800 px-4 py-2 rounded-xl text-[10px] font-bold uppercase border border-emerald-200">Local Vectorizer Active</div>
             </div>
         </header>
 
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
             
-            <!-- STAGE 1: LOAD & PREPARE -->
-            <section class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-full">
+            <!-- STAGE 1: KNOWLEDGE BASE & STORAGE MANAGER -->
+            <section class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[750px]">
                 <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
-                    <span class="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center text-sm font-bold">1</span>
-                    Import iFlows
+                    <span class="w-7 h-7 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-bold">1</span>
+                    Manage Knowledge
                 </h2>
-                <input type="file" id="jsonInput" class="hidden" accept=".json" multiple>
-                <button onclick="document.getElementById('jsonInput').click()" class="w-full py-4 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-all mb-4 active:scale-95 shadow-lg shadow-blue-200">
-                    Upload Analysis JSON(s)
-                </button>
                 
-                <div id="dbStats" class="mb-4 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                    <div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase">
-                        <span>Total iFlows:</span>
-                        <span id="iflowCount" class="text-slate-900">0</span>
+                <input type="file" id="jsonInput" class="hidden" accept=".json" multiple>
+                <button onclick="document.getElementById('jsonInput').click()" class="w-full py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-all mb-4 active:scale-95 shadow-md">
+                    Upload JSON Files
+                </button>
+
+                <!-- Storage Statistics -->
+                <div class="grid grid-cols-2 gap-2 mb-4">
+                    <div class="p-2 bg-slate-50 rounded-lg border border-slate-100 text-center">
+                        <p id="iflowCount" class="text-lg font-black text-blue-600">0</p>
+                        <p class="text-[9px] uppercase font-bold text-slate-400">iFlows</p>
                     </div>
-                    <div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase mt-2">
-                        <span>Stored Components:</span>
-                        <span id="recordCount" class="text-slate-900">0</span>
+                    <div class="p-2 bg-slate-50 rounded-lg border border-slate-100 text-center">
+                        <p id="recordCount" class="text-lg font-black text-slate-600">0</p>
+                        <p class="text-[9px] uppercase font-bold text-slate-400">Records</p>
                     </div>
                 </div>
 
-                <div id="chunkPreview" class="flex-grow max-h-[400px] overflow-y-auto space-y-2 pr-2">
-                    <p class="text-slate-300 italic text-center py-10 text-xs">Waiting for files...</p>
+                <!-- Active Storage List -->
+                <div class="mb-2 flex justify-between items-center">
+                    <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-widest">In Vector Storage</h3>
+                    <button onclick="updateStorageList()" class="text-[10px] text-blue-500 font-bold hover:underline">Refresh</button>
+                </div>
+                <div id="storageList" class="flex-grow overflow-y-auto space-y-2 pr-1 mb-4 border-t pt-2">
+                    <p class="text-slate-300 italic text-center py-10 text-[10px]">Database empty...</p>
+                </div>
+
+                <!-- Chunk Preview (Temporary) -->
+                <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 border-t pt-4">Upload Preview</h3>
+                <div id="chunkPreview" class="h-32 overflow-y-auto space-y-1 pr-1 text-[9px]">
+                    <p class="text-slate-300 italic text-center py-4">No pending uploads...</p>
                 </div>
             </section>
 
-            <!-- STAGE 2: PROCESS VECTORS -->
-            <section class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-full">
+            <!-- STAGE 2: AI CONFIG & VECTOR ENGINE -->
+            <section class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[750px]">
                 <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
-                    <span class="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center text-sm font-bold">2</span>
-                    Embedding Engine
+                    <span class="w-7 h-7 rounded-full bg-indigo-600 text-white flex items-center justify-center text-xs font-bold">2</span>
+                    AI Configuration
                 </h2>
-                <p class="text-[10px] text-slate-400 font-bold uppercase mb-4">Note: Only "Architectural Analysis" is vectorized for optimized search.</p>
+
+                <div class="space-y-3 mb-6 p-3 bg-indigo-50 rounded-xl border border-indigo-100">
+                    <div>
+                        <label class="text-[9px] font-bold text-indigo-400 uppercase">OpenRouter API Key</label>
+                        <input type="password" id="apiConfigKey" placeholder="sk-or-v1-..." class="w-full text-xs p-2 rounded border-none outline-none focus:ring-1 ring-indigo-400">
+                    </div>
+                    <div>
+                        <label class="text-[9px] font-bold text-indigo-400 uppercase">Model Name</label>
+                        <input type="text" id="apiConfigModel" placeholder="xiaomi/mimo-v2-flash:free" class="w-full text-xs p-2 rounded border-none outline-none focus:ring-1 ring-indigo-400">
+                    </div>
+                    <p class="text-[9px] text-indigo-400 italic">Settings saved automatically to local storage.</p>
+                </div>
+
                 <button id="embedBtn" disabled class="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-30 transition-all mb-4">
-                    Vectorize iFlow Descriptions
+                    Vectorize & Store
                 </button>
-                <div id="progressArea" class="hidden mb-4 p-4 bg-indigo-50 rounded-xl border border-indigo-100">
+
+                <div id="progressArea" class="hidden mb-4 p-3 bg-slate-50 rounded-xl border border-slate-100">
                     <div class="flex justify-between text-[10px] font-bold mb-1">
-                        <span id="progressText" class="text-indigo-600 uppercase">Initializing...</span>
+                        <span id="progressText" class="text-indigo-600 uppercase">Indexing...</span>
                         <span id="progressPercent">0%</span>
                     </div>
-                    <div class="w-full bg-white rounded-full h-2 overflow-hidden border border-indigo-100">
+                    <div class="w-full bg-white rounded-full h-1.5 overflow-hidden">
                         <div id="progressBar" class="bg-indigo-500 h-full transition-all" style="width: 0%"></div>
                     </div>
                 </div>
-                <div id="embeddingPreview" class="flex-grow bg-slate-900 rounded-xl p-4 text-[9px] text-emerald-400 font-mono overflow-y-auto max-h-[400px]">
-                    <p class="text-slate-700 italic">Logs...</p>
+
+                <div id="embeddingPreview" class="flex-grow bg-slate-900 rounded-xl p-4 text-[9px] text-emerald-400 font-mono overflow-y-auto">
+                    <p class="text-slate-700 italic">Engine logs...</p>
                 </div>
             </section>
 
             <!-- STAGE 3: SMART RETRIEVAL -->
-            <section class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-full">
+            <section class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[750px]">
                 <h2 class="text-lg font-bold mb-4 flex items-center gap-2 text-orange-600">
-                    <span class="w-8 h-8 rounded-full bg-orange-500 text-white flex items-center justify-center text-sm font-bold shadow-lg shadow-orange-100">3</span>
-                    iFlow Discovery
+                    <span class="w-7 h-7 rounded-full bg-orange-500 text-white flex items-center justify-center text-xs font-bold shadow-lg shadow-orange-100">3</span>
+                    Discovery
                 </h2>
                 <div class="mb-4">
                     <div class="flex gap-2">
-                        <input type="text" id="searchInput" placeholder="Describe the integration goal..." class="flex-grow p-3 border border-slate-200 rounded-xl text-sm outline-none focus:border-orange-500 focus:ring-4 ring-orange-50 transition-all">
-                        <button id="searchBtn" class="bg-orange-500 text-white px-4 rounded-xl hover:bg-orange-600 active:scale-90 transition-transform shadow-lg shadow-orange-100">🔍</button>
+                        <input type="text" id="searchInput" placeholder="Search architectural intent..." class="flex-grow p-3 border border-slate-200 rounded-xl text-xs outline-none focus:border-orange-500">
+                        <button id="searchBtn" class="bg-orange-500 text-white px-4 rounded-xl hover:bg-orange-600">🔍</button>
                     </div>
                 </div>
                 
-                <div id="searchResults" class="flex-grow overflow-y-auto space-y-4 pr-2">
-                    <p class="text-slate-300 italic text-center py-10 text-sm">Describe a use-case to find the right iFlow.</p>
+                <div id="searchResults" class="flex-grow overflow-y-auto space-y-4 pr-1">
+                    <p class="text-slate-300 italic text-center py-10 text-xs">Awaiting discovery query...</p>
+                </div>
+            </section>
+
+            <!-- STAGE 4: AI ARCHITECT CHAT -->
+            <section class="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[750px]">
+                <h2 class="text-lg font-bold mb-4 flex items-center gap-2 text-blue-600">
+                    <span class="w-7 h-7 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold shadow-lg shadow-blue-100">4</span>
+                    Architect Chat
+                </h2>
+                <div class="chat-container">
+                    <div id="chatMessages" class="chat-messages bg-slate-50/50 rounded-xl mb-4 border border-slate-100">
+                        <div class="bubble bubble-ai">Identify an iFlow in Stage 3 to load its logic into this chat.</div>
+                    </div>
+                    <div class="flex flex-col gap-2">
+                        <div id="chatContextStatus" class="text-[9px] text-slate-400 font-bold uppercase truncate px-2">Grounding: None</div>
+                        <div class="flex gap-2">
+                            <input type="text" id="chatInput" placeholder="Ask about logic or changes..." class="flex-grow p-3 border border-slate-200 rounded-xl text-xs outline-none focus:border-blue-500" disabled>
+                            <button id="chatSendBtn" class="bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 disabled:opacity-50" disabled>Send</button>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -112,9 +163,15 @@
         let chunksToProcess = [];
         let extractor = null;
         let db = null;
+        let activeContextText = "";
+        let chatHistory = [];
         
-        const DB_NAME = "CPI_RAG_DATABASE_V4";
+        const DB_NAME = "CPI_RAG_DATABASE_V5";
         const STORE_NAME = "vectors";
+
+        // Persistent Config Keys
+        const STORAGE_KEY_API = "cpi_rag_openrouter_key";
+        const STORAGE_KEY_MODEL = "cpi_rag_openrouter_model";
 
         async function initDB() {
             return new Promise((resolve, reject) => {
@@ -128,6 +185,7 @@
                 request.onsuccess = (e) => {
                     db = e.target.result;
                     updateStats();
+                    updateStorageList();
                     resolve();
                 };
                 request.onerror = (e) => reject(e);
@@ -147,45 +205,95 @@
             };
         }
 
+        async function updateStorageList() {
+            if (!db) return;
+            const transaction = db.transaction(STORE_NAME, "readonly");
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+            request.onsuccess = () => {
+                const allData = request.result;
+                const uniqueSources = [...new Set(allData.map(d => d.source_id))];
+                const container = document.getElementById('storageList');
+                
+                if (uniqueSources.length === 0) {
+                    container.innerHTML = `<p class="text-slate-300 italic text-center py-10 text-[10px]">Database empty...</p>`;
+                    return;
+                }
+
+                container.innerHTML = uniqueSources.map(source => `
+                    <div class="group flex justify-between items-center p-2 bg-slate-50 border border-slate-100 rounded-lg hover:border-blue-200 transition-all">
+                        <div class="overflow-hidden">
+                            <p class="text-[10px] font-bold text-slate-700 truncate" title="${source}">${source}</p>
+                            <p class="text-[8px] text-slate-400 font-mono">${allData.filter(d => d.source_id === source).length} records</p>
+                        </div>
+                        <button onclick="deleteSource('${source}')" class="text-red-300 hover:text-red-500 p-1">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                        </button>
+                    </div>
+                `).join('');
+            };
+        }
+
+        async function deleteSource(sourceId) {
+            if (!confirm(`Permanently remove all logic and vectors for: ${sourceId}?`)) return;
+            const transaction = db.transaction(STORE_NAME, "readwrite");
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+            
+            request.onsuccess = () => {
+                const allData = request.result;
+                const idsToDelete = allData.filter(d => d.source_id === sourceId).map(d => d.uid);
+                idsToDelete.forEach(uid => store.delete(uid));
+                transaction.oncomplete = () => {
+                    updateStats();
+                    updateStorageList();
+                };
+            };
+        }
+
+        // --- STAGE 1 LOGIC ---
         document.getElementById('jsonInput').addEventListener('change', async (e) => {
-            const files = e.target.files;
+            const files = Array.from(e.target.files);
             chunksToProcess = [];
             
             for (let file of files) {
-                const text = await file.text();
-                const data = JSON.parse(text);
-                const sourceId = data.iflow_file || file.name;
+                try {
+                    const text = await file.text();
+                    const data = JSON.parse(text);
+                    const sourceId = data.iflow_file || file.name;
 
-                // Priority Chunk: Architectural Analysis
-                if (data.architectural_analysis) {
-                    chunksToProcess.push({ 
-                        id: "ARCH_ANALYSIS", 
-                        source_id: sourceId, 
-                        type: "Analysis", 
-                        text: `[Source: ${sourceId}] ARCHITECTURE: ${data.architectural_analysis}` 
+                    if (data.architectural_analysis) {
+                        chunksToProcess.push({ 
+                            id: "ARCH_ANALYSIS", 
+                            source_id: sourceId, 
+                            type: "Analysis", 
+                            text: `[Source: ${sourceId}] ARCHITECTURE: ${data.architectural_analysis}` 
+                        });
+                    }
+                    data.steps.forEach(step => {
+                        chunksToProcess.push({ 
+                            id: `STEP_${step.step_number}`, 
+                            source_id: sourceId, 
+                            type: step.type, 
+                            text: `[Source: ${sourceId}] STEP ${step.step_number} (${step.type}): ${step.ai_summary}`,
+                            step_num: step.step_number
+                        });
                     });
+                } catch (err) {
+                    console.error("File Read Error:", err);
                 }
-                // Background Data: Steps
-                data.steps.forEach(step => {
-                    chunksToProcess.push({ 
-                        id: `STEP_${step.step_number}`, 
-                        source_id: sourceId, 
-                        type: step.type, 
-                        text: `[Source: ${sourceId}] STEP ${step.step_number} (${step.type}): ${step.ai_summary}`,
-                        step_num: step.step_number
-                    });
-                });
             }
 
             document.getElementById('chunkPreview').innerHTML = chunksToProcess.map(c => 
-                `<div class="p-2 bg-slate-50 border rounded-lg border-slate-200 mb-1">
-                    <span class="font-bold text-blue-600 text-[9px] uppercase">${c.id}</span>
-                    <p class="truncate opacity-60 text-[8px]">${c.source_id}</p>
+                `<div class="p-1.5 bg-slate-50 border rounded border-slate-200 mb-1 opacity-70">
+                    <span class="font-bold text-blue-600 text-[8px] uppercase">${c.id}</span>
+                    <p class="truncate text-[8px]">${c.source_id}</p>
                 </div>`
             ).join('');
             document.getElementById('embedBtn').disabled = false;
         });
 
+        // --- STAGE 2 LOGIC ---
         document.getElementById('embedBtn').addEventListener('click', async () => {
             const btn = document.getElementById('embedBtn');
             const progressArea = document.getElementById('progressArea');
@@ -207,10 +315,9 @@
 
                 for (let i = 0; i < chunksToProcess.length; i++) {
                     const chunk = chunksToProcess[i];
-                    progressText.innerText = `Indexing ${chunk.id}...`;
+                    progressText.innerText = `Vectorizing ${chunk.id}...`;
                     
                     let vector = null;
-                    // STRATEGY: Only embed ARCH_ANALYSIS chunks to make search focused
                     if (chunk.id === "ARCH_ANALYSIS") {
                         const output = await extractor(chunk.text, { pooling: 'mean', normalize: true });
                         vector = Array.from(output.data);
@@ -228,19 +335,21 @@
                     document.getElementById('embeddingPreview').prepend(line);
                 }
                 
-                progressText.innerText = "ALL IFLOWS INDEXED";
+                progressText.innerText = "STORAGE COMMIT DONE";
                 updateStats();
+                updateStorageList();
                 chunksToProcess = [];
             } catch (err) {
                 console.error(err);
             }
         });
 
+        // --- STAGE 3 LOGIC ---
         async function performSearch() {
             const query = document.getElementById('searchInput').value.trim();
             if (!query || !extractor) return;
 
-            document.getElementById('searchResults').innerHTML = `<p class="text-center animate-pulse text-sm text-slate-400">Searching Architectures...</p>`;
+            document.getElementById('searchResults').innerHTML = `<p class="text-center animate-pulse text-xs text-slate-400">Performing semantic search...</p>`;
             
             const output = await extractor(query, { pooling: 'mean', normalize: true });
             const queryVector = Array.from(output.data);
@@ -251,11 +360,8 @@
 
             request.onsuccess = () => {
                 const allData = request.result;
-                
-                // 1. Separate Architectural Analysis chunks
                 const archs = allData.filter(d => d.id === "ARCH_ANALYSIS");
                 
-                // 2. Score them against the query
                 const scoredArchs = archs.map(item => {
                     let dotProduct = 0;
                     for (let i = 0; i < queryVector.length; i++) {
@@ -264,18 +370,14 @@
                     return { ...item, score: dotProduct };
                 }).sort((a, b) => b.score - a.score);
 
-                // 3. Take the BEST matching iFlow (Top 1)
                 const bestMatch = scoredArchs[0];
 
-                if (!bestMatch || bestMatch.score < 0.3) {
-                    document.getElementById('searchResults').innerHTML = `<p class="text-center text-sm text-slate-400">No matching integration architecture found.</p>`;
+                if (!bestMatch || bestMatch.score < 0.25) {
+                    document.getElementById('searchResults').innerHTML = `<p class="text-center text-xs text-slate-400">No matching integrations found.</p>`;
                     return;
                 }
 
-                // 4. Retrieve THE FULL IFLOW (Analysis + All Steps)
                 const fullFlow = allData.filter(d => d.source_id === bestMatch.source_id);
-                
-                // 5. Sort logically: Analysis first, then Step 1, 2, 3...
                 fullFlow.sort((a, b) => {
                     if (a.id === "ARCH_ANALYSIS") return -1;
                     if (b.id === "ARCH_ANALYSIS") return 1;
@@ -283,6 +385,15 @@
                 });
 
                 renderFullFlow(fullFlow, bestMatch.score);
+                
+                // Set Chat Context
+                activeContextText = fullFlow.map(f => `${f.id}: ${f.text}`).join("\n");
+                document.getElementById('chatContextStatus').innerText = `Context: ${bestMatch.source_id}`;
+                document.getElementById('chatInput').disabled = false;
+                document.getElementById('chatSendBtn').disabled = false;
+                
+                chatHistory = [];
+                document.getElementById('chatMessages').innerHTML = `<div class="bubble bubble-ai">I've retrieved <b>${fullFlow.length}</b> logic nodes for ${bestMatch.source_id}. Ready for consultation.</div>`;
             };
         }
 
@@ -291,52 +402,151 @@
             const sourceId = data[0].source_id;
 
             container.innerHTML = `
-                <div class="arch-match-header p-4 shadow-lg mb-6">
-                    <div class="flex justify-between items-start mb-2">
-                        <span class="text-[9px] font-black uppercase tracking-widest opacity-60">Architectural Discovery</span>
-                        <span class="text-[10px] bg-emerald-500 px-2 py-0.5 rounded-full font-bold">Match: ${Math.round(score * 100)}%</span>
+                <div class="arch-match-header p-4 shadow-md mb-4">
+                    <div class="flex justify-between items-start mb-1">
+                        <span class="text-[8px] font-black uppercase tracking-widest opacity-60">Architectural Discovery</span>
+                        <span class="text-[9px] bg-emerald-500 px-2 py-0.5 rounded-full font-bold">Score: ${Math.round(score * 100)}%</span>
                     </div>
-                    <h3 class="text-sm font-bold truncate mb-1">${sourceId}</h3>
-                    <p class="text-[10px] opacity-70">Total Logic Steps: ${data.length - 1}</p>
+                    <h3 class="text-[11px] font-bold truncate mb-1" title="${sourceId}">${sourceId}</h3>
+                    <p class="text-[9px] opacity-70">${data.length - 1} technical steps pulled.</p>
                 </div>
             `;
 
             container.innerHTML += data.map(res => {
                 if (res.id === "ARCH_ANALYSIS") {
                     return `
-                        <div class="p-4 bg-white border-2 border-slate-900 rounded-2xl mb-6 shadow-sm">
-                            <div class="text-[9px] font-bold text-slate-400 uppercase mb-2">Architectural Summary</div>
-                            <p class="text-xs text-slate-800 leading-relaxed font-semibold">${res.text.replace(/\[Source:.*?\] ARCHITECTURE: /, '')}</p>
+                        <div class="p-3 bg-white border-2 border-slate-800 rounded-xl mb-4 shadow-sm">
+                            <div class="text-[8px] font-bold text-slate-400 uppercase mb-1">Architectural Focus</div>
+                            <p class="text-[10px] text-slate-800 font-medium">${res.text.replace(/\[Source:.*?\] ARCHITECTURE: /, '')}</p>
                         </div>
-                        <div class="text-[10px] font-bold text-slate-400 uppercase mb-4 tracking-widest border-b pb-1">Technical Step Sequence:</div>
                     `;
                 }
                 return `
-                    <div class="p-3 step-bubble rounded-xl text-[11px] mb-3 transition-all hover:bg-blue-50">
-                        <div class="font-black text-slate-400 text-[9px] uppercase mb-1">${res.id} • ${res.type}</div>
-                        <p class="text-slate-600 leading-tight">${res.text.replace(/\[Source:.*?\] STEP \d+ \(.*?\): /, '')}</p>
+                    <div class="p-2 step-bubble rounded-lg text-[9px] mb-2">
+                        <div class="font-bold text-slate-400 text-[8px] uppercase mb-1">${res.id} • ${res.type}</div>
+                        <p class="text-slate-600">${res.text.replace(/\[Source:.*?\] STEP \d+ \(.*?\): /, '')}</p>
                     </div>
                 `;
             }).join('');
-            
             container.scrollTop = 0;
+        }
+
+        // --- STAGE 4 LOGIC ---
+        async function sendChatMessage() {
+            const input = document.getElementById('chatInput');
+            const query = input.value.trim();
+            const apiKey = document.getElementById('apiConfigKey').value.trim();
+            const model = document.getElementById('apiConfigModel').value.trim();
+
+            if (!query || !activeContextText) return;
+            if (!apiKey) {
+                alert("Please provide an OpenRouter API Key in Stage 2.");
+                return;
+            }
+
+            addBubble(query, 'user');
+            input.value = "";
+            const thinkingId = addBubble("OpenRouter Thinking...", 'ai');
+
+            const systemPrompt = `You are a professional SAP CPI Architect. 
+            CONTEXT:
+            ${activeContextText}
+            
+            Use the context above to explain implementation details or proposed changes. Refer to STEP numbers.`;
+
+            const messages = [
+                { role: 'system', content: systemPrompt },
+                ...chatHistory,
+                { role: 'user', content: query }
+            ];
+
+            try {
+                const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
+                    body: JSON.stringify({ model: model, messages: messages })
+                });
+
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+
+                const result = await response.json();
+                const aiResponse = result.choices[0].message.content;
+
+                updateBubble(thinkingId, aiResponse);
+                chatHistory.push({ role: 'user', content: query });
+                chatHistory.push({ role: 'assistant', content: aiResponse });
+                
+                if (chatHistory.length > 10) chatHistory = chatHistory.slice(-10);
+
+            } catch (err) {
+                console.error(err);
+                updateBubble(thinkingId, `<span class="text-red-500 font-bold">Error:</span> ${err.message}`);
+            }
+        }
+
+        function addBubble(text, role) {
+            const id = 'bubble-' + Date.now();
+            const container = document.getElementById('chatMessages');
+            const div = document.createElement('div');
+            div.id = id;
+            div.className = `bubble bubble-${role}`;
+            div.innerHTML = text.replace(/\n/g, '<br>');
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+            return id;
+        }
+
+        function updateBubble(id, text) {
+            const div = document.getElementById(id);
+            if (div) {
+                div.innerHTML = text.replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+            }
+            const container = document.getElementById('chatMessages');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // --- GLOBAL & STORAGE HELPERS ---
+        function setupConfig() {
+            const savedKey = localStorage.getItem(STORAGE_KEY_API);
+            const savedModel = localStorage.getItem(STORAGE_KEY_MODEL);
+            const keyEl = document.getElementById('apiConfigKey');
+            const modelEl = document.getElementById('apiConfigModel');
+
+            if (savedKey) keyEl.value = savedKey;
+            if (savedModel) modelEl.value = savedModel;
+
+            keyEl.addEventListener('input', () => localStorage.setItem(STORAGE_KEY_API, keyEl.value));
+            modelEl.addEventListener('input', () => localStorage.setItem(STORAGE_KEY_MODEL, modelEl.value));
         }
 
         document.getElementById('searchBtn').addEventListener('click', performSearch);
         document.getElementById('searchInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') performSearch(); });
+        document.getElementById('chatSendBtn').addEventListener('click', sendChatMessage);
+        document.getElementById('chatInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendChatMessage(); });
 
         document.getElementById('clearDbBtn').addEventListener('click', () => {
-            if (confirm("Delete all stored iFlow knowledge?")) {
-                const transaction = db.transaction(STORE_NAME, "readwrite");
-                transaction.objectStore(STORE_NAME).clear();
-                transaction.oncomplete = () => {
-                    updateStats();
-                    document.getElementById('searchResults').innerHTML = `<p class="text-center text-sm text-slate-400">Database wiped.</p>`;
-                };
-            }
+            if (!confirm("Permanently wipe the entire local vector database?")) return;
+            const transaction = db.transaction(STORE_NAME, "readwrite");
+            transaction.objectStore(STORE_NAME).clear();
+            transaction.oncomplete = () => {
+                updateStats();
+                updateStorageList();
+                document.getElementById('searchResults').innerHTML = `<p class="text-center text-xs text-slate-400">Database wiped.</p>`;
+            };
         });
 
-        window.onload = initDB;
+        window.onload = () => {
+            initDB();
+            setupConfig();
+        };
+
+        // Export for global access via onclick
+        window.deleteSource = deleteSource;
+        window.updateStorageList = updateStorageList;
+
     </script>
 </body>
 </html>
