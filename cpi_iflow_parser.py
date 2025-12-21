@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-SAP CPI AI Explainer - RAG Generator
-1. PASS 1: Step-by-step AI analysis using a fast model (e.g., llama3.1).
-2. PASS 2: Architectural grouping using a reasoning model (e.g., qwen3).
-3. OUTPUT: Generates a structured JSON file for RAG training.
+SAP CPI AI Explainer - Batch Processor
+1. Processes multiple ZIP files provided as arguments.
+2. Uses DeepSeek API for step-by-step analysis and architectural summary.
+3. Outputs: iflow_analysis_for_<filename>.json for each input.
 """
 
 import zipfile
@@ -16,12 +16,11 @@ import urllib.error
 from pathlib import Path
 
 # --- CONFIGURATION ---
-API_URL = "http://localhost:11434/api/chat"
-STEP_MODEL = "llama3.1:8b" 
-ARCHITECT_MODEL = "llama3.1:8b"
-MAX_STEPS = 1000 
-OUTPUT_FILE = "cpi_analysis_output.json"
-# ---------------------
+# The dummy key provided in the request
+DEEPSEEK_API_KEY = "sk-f7d101c4a97246318ab270f5d67abfdd"
+API_URL = "https://api.deepseek.com/chat/completions"
+MODEL = "deepseek-chat"
+MAX_STEPS = 500  # Safety limit for steps per iFlow
 
 NAMESPACES = {
     'bpmn2': 'http://www.omg.org/spec/BPMN/20100524/MODEL',
@@ -32,102 +31,86 @@ for prefix, uri in NAMESPACES.items():
 
 # --- PROMPTS ---
 ARCHITECT_SYSTEM_PROMPT = """You are an SAP CPI Integration Architect.
-
-Your task is to generate a HIGH-QUALITY INTEGRATION DESCRIPTION based on the steps and
-that will be used for semantic search and retrieval.
+Your task is to generate a HIGH-QUALITY INTEGRATION DESCRIPTION based on all the steps we analyzed.
+This will be used for semantic search and retrieval (RAG).
 
 STRICT RULES:
 - Output ONLY the description.
 - Do NOT list steps or phases.
 - Do NOT explain implementation details.
 - Do NOT speculate or add business justification.
-- Do NOT use generic phrases like “various processing” or “further handling”.
+- Do NOT use generic phrases like "various processing".
 
 WHAT TO INCLUDE:
-- Source system(s)
-- Target system(s)
-- Type of data exchanged
-- Key technical behaviors (e.g., scheduled, event-driven, conditional, enrichment)
-- Any notable constraints or patterns (e.g., routing, transformation, validation)
+- Source and Target system(s).
+- Type of data exchanged.
+- Key technical behaviors (scheduled, event-driven, routing, transformation).
 
 STYLE:
-- 2–5 concise sentences.
-- Technical, concrete, and factual.
-- Optimized for semantic similarity, not human storytelling.
+- 2–4 concise sentences.
+- , concrete, and factual.
+- Plain text only."""
 
-OUTPUT FORMAT:
-- Plain text only. No headings. No bullet points."""
-
-class AIHelper:
-    def __init__(self):
+class DeepSeekAIHelper:
+    def __init__(self, api_key):
+        self.api_key = api_key
         self.url = API_URL
 
-    def get_step_summary(self, context, data):
-        """Pass 1: Get concise explanation of a single step."""
-        if not data: return "(No technical data)"
-        
-        prompt = f"Explain this '{context}' step. TECHNICAL DATA:\n{data}"
+    def _call_api(self, messages):
         payload = {
-            "model": STEP_MODEL,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": "Tell in 2-4 lines only:- Clearly state what the step does there.- Mention important fields, expressions, endpoints, or conditions if present."},
-                {"role": "user", "content": prompt}
-            ]
+            "model": MODEL,
+            "messages": messages,
+            "stream": False
         }
-        return self._call_ollama(payload)
+        
+        # Exponential Backoff Implementation
+        max_retries = 5
+        for i in range(max_retries):
+            try:
+                req = urllib.request.Request(
+                    self.url,
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Authorization': f'Bearer {self.api_key}'
+                    }
+                )
+                with urllib.request.urlopen(req) as response:
+                    result = json.loads(response.read().decode('utf-8'))
+                    return result["choices"][0]["message"]["content"].strip()
+            except urllib.error.HTTPError as e:
+                if e.code == 429:  # Rate limit
+                    wait = 2 ** i
+                    time.sleep(wait)
+                    continue
+                return f"(API Error: {e.code} - {e.reason})"
+            except Exception as e:
+                return f"(Connection Error: {str(e)})"
+        return "(Error: Max retries exceeded)"
+
+    def get_step_summary(self, context, data):
+        if not data: return "Standard processing step."
+
+        system_msg = "You are a concise SAP CPI expert. Summarize this step and tell what we did exactly in this step with in 1-3 lines. u can mention any fields/variables/or any we used in this in summary."
+        user_msg = f"Explain this '{context}' step. TECHNICAL DATA:\n{data}"
+        
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg}
+        ]
+        return self._call_api(messages)
 
     def get_architectural_analysis(self, full_flow_text):
-        """Pass 2: Group the summarized flow into architectural phases."""
-        prompt = (
-            "Analyze the following SAP CPI iFlow.\n\n"
-    "Task:\n"
-    "Generate a concise, high-quality INTEGRATION DESCRIPTION based on the steps provided,\n"
-    "that can be used for semantic search (RAG).\n\n"
-    "Rules:\n"
-    "- Output ONLY the description.\n"
-    "- Do NOT list steps or phases.\n"
-    "- Do NOT speculate about business intent.\n"
-    "- Do NOT use generic phrases (e.g., 'various processing').\n"
-    "- Be concrete and technical.\n\n"
-    "Include:\n"
-    "- Source system(s)\n"
-    "- Target system(s)\n"
-    "- Type of data exchanged\n"
-    "- Key technical behaviors (scheduled, conditional, enrichment, routing, transformation)\n\n"
-    "Style:\n"
-    "- 2 to 4 sentences.\n"
-    "- Plain text only.\n\n"
-            f"iFlow steps:\n{full_flow_text}"
-        )
-        
-        payload = {
-            "model": ARCHITECT_MODEL,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ]
-        }
-        print(f"\n🧠 Sending aggregated context to Architect ({ARCHITECT_MODEL})...")
-        return self._call_ollama(payload)
-
-    def _call_ollama(self, payload):
-        try:
-            req = urllib.request.Request(
-                self.url,
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
-            )
-            with urllib.request.urlopen(req) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result["message"]["content"].strip()
-        except Exception as e:
-            return f"(AI Error: {str(e)})"
+        messages = [
+            {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Analyze the following SAP CPI iFlow steps and provide the architectural description:\n\n{full_flow_text}"}
+        ]
+        return self._call_api(messages)
 
 class CPIFlowAnalyzer:
-    def __init__(self, zip_path):
+    def __init__(self, zip_path, ai_helper):
         self.zip_path = Path(zip_path)
+        self.ai = ai_helper
         self.xml_content = None
         self.root = None
         self.elements = {}
@@ -135,7 +118,6 @@ class CPIFlowAnalyzer:
         self.parameters = {}       
         self.step_counter = 0
         self.zip_file = None
-        self.ai = AIHelper()
         self.rag_data = {
             "iflow_file": self.zip_path.name,
             "steps": [],
@@ -146,15 +128,19 @@ class CPIFlowAnalyzer:
         try:
             self.zip_file = zipfile.ZipFile(self.zip_path, 'r')
             self._load_parameters()
+            # Find the core integration flow XML
             candidates = [f for f in self.zip_file.namelist() if f.endswith('.iflw') and 'integrationflow' in f.lower()]
-            if not candidates: raise Exception("No .iflw found")
+            if not candidates:
+                print(f"  [!] No .iflw file found in {self.zip_path.name}")
+                return False
             with self.zip_file.open(candidates[0]) as f:
                 self.xml_content = f.read()
             self.root = ET.fromstring(self.xml_content)
             self._parse_elements()
+            return True
         except Exception as e:
-            print(f"Error loading ZIP: {e}")
-            sys.exit(1)
+            print(f"  [!] Error loading {self.zip_path.name}: {e}")
+            return False
 
     def _load_parameters(self):
         try:
@@ -179,6 +165,7 @@ class CPIFlowAnalyzer:
         return res
 
     def _parse_elements(self):
+        # Parse Message Flows (Adapters)
         for mf in self.root.findall('.//bpmn2:messageFlow', NAMESPACES):
             props = self._get_ifl_properties(mf)
             props = self._resolve_placeholders(props)
@@ -186,6 +173,7 @@ class CPIFlowAnalyzer:
             if s: self.adapter_configs[s] = props
             if t: self.adapter_configs[t] = props
 
+        # Parse BPMN Elements
         for elem in self.root.findall('.//*[@id]'):
             eid = elem.get('id')
             tag = elem.tag.split('}')[-1]
@@ -196,11 +184,11 @@ class CPIFlowAnalyzer:
                 'name': elem.get('name', ''),
                 'tag': tag,
                 'type': self._determine_readable_type(elem, tag, props),
-                'element': elem,
                 'props': props,
                 'outgoing': []
             }
             
+        # Map connections
         for sf in self.root.findall('.//bpmn2:sequenceFlow', NAMESPACES):
             s, t = sf.get('sourceRef'), sf.get('targetRef')
             if s in self.elements and t in self.elements:
@@ -222,14 +210,10 @@ class CPIFlowAnalyzer:
         if tag == 'startEvent': return "Start Timer" if elem.find('.//bpmn2:timerEventDefinition', NAMESPACES) is not None else "Start Message"
         if tag == 'endEvent': return "End"
         if tag == 'callActivity':
-            if atype == 'Mapping': return "Message Mapping"
-            if atype == 'Script': return "Groovy Script"
-            if atype == 'Enricher': return "Content Modifier"
-            if atype == 'Splitter': return "Splitter"
-            if atype == 'XmlModifier': return "XML Modifier"
-            if atype == 'ProcessCallElement': return "Process Call"
-            if atype == 'Filter': return "Filter"
-            if atype == 'DBStorage': return "Data Store"
+            mapping = {'Mapping': 'Message Mapping', 'Script': 'Groovy Script', 'Enricher': 'Content Modifier', 
+                       'Splitter': 'Splitter', 'XmlModifier': 'XML Modifier', 'ProcessCallElement': 'Process Call', 
+                       'Filter': 'Filter', 'DBStorage': 'Data Store','LocIntegration Process':'Local Integration Process'}
+            return mapping.get(atype, atype)
         if tag == 'serviceTask':
             if atype == 'ExternalCall': return "Request Reply"
             if atype == 'contentEnricherWithLookup': return "Content Enricher"
@@ -247,118 +231,87 @@ class CPIFlowAnalyzer:
         return None
 
     def get_step_tech_data(self, node):
-        name = node['name']
-        props = node['props']
-        ntype = node['type']
-        nid = node['id']
-        
-        # Build concise tech string for Step AI
+        props, ntype, nid = node['props'], node['type'], node['id']
         if ntype == 'Groovy Script':
             f = props.get('script')
             c = self.get_resource_content(f)
-            return f"Script: {f}\nCode:\n{c[:500]}..." if c else "File not found"
+            return f"Script: {f}\nCode snippet:\n{c[:400]}" if c else "Script file content missing."
         elif ntype == 'Content Modifier':
-            p = props.get('propertyTable') or ''
-            h = props.get('headerTable') or ''
-            return f"Props: {p}\nHeaders: {h}"
+            return f"Props: {props.get('propertyTable', '')}\nHeaders: {props.get('headerTable', '')}"
         elif ntype in ['Request Reply', 'Content Enricher', 'Send']:
             ap = self.adapter_configs.get(nid, {})
             full = {**props, **ap}
-            return f"System: {full.get('address')}\nEntity: {full.get('resourcePath')}\nQuery: {full.get('queryOptions')}"
+            return f"Adapter: {full.get('adapterId')}\nAddress: {full.get('address')}\nResource: {full.get('resourcePath')}"
         elif "Mapping" in ntype:
-            return f"Mapping File: {props.get('mappingname')}"
-        elif ntype == 'Router':
-            return "Routing Decision"
-        return "Standard Step"
+            return f"Mapping: {props.get('mappingname')}"
+        return "Generic integration step."
 
     def find_start_node(self):
         for proc in self.root.findall('.//bpmn2:process', NAMESPACES):
-            if 'Integration Process' in proc.get('name', ''):
-                start = proc.find('bpmn2:startEvent', NAMESPACES)
-                if start is not None: return start.get('id')
+            start = proc.find('bpmn2:startEvent', NAMESPACES)
+            if start is not None: return start.get('id')
         return None
 
-    def run_two_pass_analysis(self):
+    def process(self):
         curr = self.find_start_node()
-        if not curr: return
+        if not curr:
+            print("  [!] Could not find start node.")
+            return
 
-        print(f"🚀 PASS 1: Analyzing steps one-by-one ({STEP_MODEL})...")
-        
-        # Using a stack for Depth-First Traversal (to cover all branches)
-        # Each item is (node_id)
-        # We also need a way to order them roughly sequentially for the report, 
-        # but DFS naturally follows flow.
-        
-        # NOTE: For RAG purposes, a simple linear walk of the main path + side paths is okay.
-        # But a true graph walk is safer to not miss detached ends.
-        # Let's stick to the queue/stack based traversal we discussed.
-        
         queue = [curr]
         visited = set()
         functional_summaries = []
         
+        print(f"  [+] Analyzing steps for {self.zip_path.name}...")
+        
         while queue and self.step_counter < MAX_STEPS:
-            curr = queue.pop(0) # BFS style (Process level by level-ish)
-            
-            if curr in visited: continue
+            curr = queue.pop(0)
+            if curr in visited or curr not in self.elements: continue
             visited.add(curr)
             
             node = self.elements[curr]
             self.step_counter += 1
-            print(f"   Step {self.step_counter}: {node['name']} ({node['type']})", end="...", flush=True)
             
-            # 1. Get Tech Data
             tech_data = self.get_step_tech_data(node)
-            
-            # 2. Ask Step AI
             summary = self.ai.get_step_summary(node['type'], tech_data)
-            print(f" -> {summary}")
             
-            # 3. Store for Pass 2 AND RAG Data
-            summary_text = f"Step {self.step_counter}: {node['name']} ({node['type']}) -> {summary}"
-            functional_summaries.append(summary_text)
-            
-            # Add to Structured Data (SIMPLIFIED AS REQUESTED)
+            functional_summaries.append(f"Step {self.step_counter}: {node['name']} ({node['type']}) -> {summary}")
             self.rag_data["steps"].append({
-                "step_number": self.step_counter,
+                "step_index": self.step_counter,
                 "type": node['type'],
-                "ai_summary": summary
+                "description": summary
             })
 
-            # Move next (Find all children)
-            if node['outgoing']:
-                for link in node['outgoing']:
-                    target_id = link['target']
-                    if target_id not in visited:
-                        queue.append(target_id)
+            for link in node['outgoing']:
+                if link['target'] not in visited:
+                    queue.append(link['target'])
 
-        print(f"\n🚀 PASS 2: Sending aggregated flow to Architect ({ARCHITECT_MODEL})...")
+        print(f"  [+] Generating architectural summary...")
         full_context = "\n".join(functional_summaries)
+        self.rag_data["architectural_analysis"] = self.ai.get_architectural_analysis(full_context)
         
-        final_analysis = self.ai.get_architectural_analysis(full_context)
+        # Determine output filename: iflow_analysis_for_<basename>.json
+        base_name = self.zip_path.stem
+        output_name = f"iflow_analysis_for_{base_name}.json"
         
-        # Store analysis
-        self.rag_data["architectural_analysis"] = final_analysis
-        
-        print("\n" + "="*60)
-        print("🏛️  ARCHITECTURAL ANALYSIS REPORT")
-        print("="*60)
-        print(final_analysis)
-        print("="*60)
-        
-        # SAVE JSON
-        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        with open(output_name, 'w', encoding='utf-8') as f:
             json.dump(self.rag_data, f, indent=4)
-        print(f"\n✅ RAG Data saved to: {OUTPUT_FILE}")
+        print(f"  [OK] Saved to {output_name}")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python cpi_ai_explainer.py <file.zip>")
+        print("Usage: python cpi_batch_analyzer.py file1.zip file2.zip ...")
         return
     
-    analyzer = CPIFlowAnalyzer(sys.argv[1])
-    analyzer.load()
-    analyzer.run_two_pass_analysis()
+    ai = DeepSeekAIHelper(DEEPSEEK_API_KEY)
+    
+    for zip_path in sys.argv[1:]:
+        print(f"\n--- Processing: {zip_path} ---")
+        analyzer = CPIFlowAnalyzer(zip_path, ai)
+        if analyzer.load():
+            analyzer.process()
+        else:
+            print(f"  [!] Skipping {zip_path}")
 
 if __name__ == "__main__":
     main()
