@@ -25,6 +25,7 @@
         .error-toast { background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; padding: 8px; border-radius: 8px; font-size: 10px; margin-bottom: 8px; }
         @keyframes pulse-blue { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .loading-pulse { animation: pulse-blue 1.5s infinite; }
+        .active-discovery { border-color: #10b981; ring: 2px; ring-color: #10b981; }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen p-4 md:p-6 text-slate-900">
@@ -127,10 +128,14 @@
                     <span class="w-7 h-7 rounded-full bg-orange-500 text-white flex items-center justify-center text-xs font-bold shadow-lg shadow-orange-100">3</span>
                     Discovery
                 </h2>
-                <div class="mb-4">
+                <div class="mb-4 space-y-2">
                     <div class="flex gap-2">
                         <input type="text" id="searchInput" placeholder="Search architectural intent..." class="flex-grow p-3 border border-slate-200 rounded-xl text-xs outline-none focus:border-orange-500">
                         <button id="searchBtn" class="bg-orange-500 text-white px-4 rounded-xl hover:bg-orange-600">🔍</button>
+                    </div>
+                    <div class="flex items-center justify-between px-1">
+                        <label class="text-[10px] font-bold text-slate-400 uppercase">Top-K iFlows to show:</label>
+                        <input type="number" id="topKInput" value="1" min="1" max="10" class="w-12 text-center text-xs p-1 border border-slate-200 rounded-md outline-none focus:border-orange-400">
                     </div>
                 </div>
                 
@@ -269,7 +274,7 @@
             setTimeout(() => div.remove(), 5000);
         }
 
-        // --- STAGE 1 ---
+        // --- STAGE 1: Corrected Mapping for "step" and "description" ---
         document.getElementById('jsonInput').addEventListener('change', async (e) => {
             const files = Array.from(e.target.files);
             if (files.length === 0) return;
@@ -292,14 +297,19 @@
                             text: `[Source: ${sourceId}] ARCHITECTURE: ${data.architectural_analysis}` 
                         });
                     }
+                    
                     if (data.steps && Array.isArray(data.steps)) {
                         data.steps.forEach(step => {
+                            // Support for both user snippet keys ("step", "description") and previous keys
+                            const stepNum = step.step !== undefined ? step.step : step.step_number;
+                            const stepDesc = step.description || step.ai_summary || 'No description available';
+                            
                             chunksToProcess.push({ 
-                                id: `STEP_${step.step_number}`, 
+                                id: `STEP_${stepNum}`, 
                                 source_id: sourceId, 
                                 type: step.type || 'Unknown', 
-                                text: `[Source: ${sourceId}] STEP ${step.step_number} (${step.type}): ${step.ai_summary || 'No summary'}`,
-                                step_num: step.step_number
+                                text: `[Source: ${sourceId}] STEP ${stepNum} (${step.type || 'Unknown'}): ${stepDesc}`,
+                                step_num: stepNum
                             });
                         });
                     }
@@ -369,9 +379,11 @@
             }
         });
 
-        // --- STAGE 3 ---
+        // --- STAGE 3: Top-K Implementation ---
         async function performSearch() {
             const query = document.getElementById('searchInput').value.trim();
+            const topK = parseInt(document.getElementById('topKInput').value) || 1;
+            
             if (!query || !extractor) return;
 
             document.getElementById('searchResults').innerHTML = `<p class="text-center animate-pulse text-xs text-slate-400">Performing semantic search...</p>`;
@@ -395,64 +407,83 @@
                     return { ...item, score: dotProduct };
                 }).sort((a, b) => b.score - a.score);
 
-                const bestMatch = scoredArchs[0];
+                const topMatches = scoredArchs.slice(0, topK);
 
-                if (!bestMatch || bestMatch.score < 0.25) {
+                if (topMatches.length === 0 || topMatches[0].score < 0.20) {
                     document.getElementById('searchResults').innerHTML = `<p class="text-center text-xs text-slate-400">No matching integrations found.</p>`;
                     return;
                 }
 
-                const fullFlow = allData.filter(d => d.source_id === bestMatch.source_id);
+                renderDiscoveryResults(topMatches);
+            };
+        }
+
+        function renderDiscoveryResults(matches) {
+            const container = document.getElementById('searchResults');
+            container.innerHTML = `<div class="text-[10px] font-black text-slate-400 uppercase mb-3 tracking-widest">Top ${matches.length} matches found:</div>`;
+            
+            container.innerHTML += matches.map(match => `
+                <div class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden mb-3 hover:border-blue-300 transition-all">
+                    <div class="arch-match-header p-3">
+                        <div class="flex justify-between items-start mb-1">
+                            <span class="text-[8px] font-black uppercase opacity-60">Architectural Discovery</span>
+                            <span class="text-[9px] bg-emerald-500 text-white px-2 py-0.5 rounded-full font-bold">${Math.round(match.score * 100)}% Match</span>
+                        </div>
+                        <h3 class="text-[10px] font-bold truncate" title="${match.source_id}">${match.source_id}</h3>
+                    </div>
+                    <div class="p-3">
+                        <div class="text-[8px] font-bold text-slate-400 uppercase mb-1">Summary Preview</div>
+                        <p class="text-[10px] text-slate-600 line-clamp-3 mb-3">${match.text.replace(/\[Source:.*?\] ARCHITECTURE: /, '')}</p>
+                        <button onclick="loadIFlowContext('${match.source_id}')" class="w-full py-1.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded-lg border border-blue-100 hover:bg-blue-600 hover:text-white transition-all">
+                            Load Into Architect Chat
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function loadIFlowContext(sourceId) {
+            const transaction = db.transaction(STORE_NAME, "readonly");
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+
+            request.onsuccess = () => {
+                const allData = request.result;
+                const fullFlow = allData.filter(d => d.source_id === sourceId);
+                
                 fullFlow.sort((a, b) => {
                     if (a.id === "ARCH_ANALYSIS") return -1;
                     if (b.id === "ARCH_ANALYSIS") return 1;
                     return (a.step_num || 0) - (b.step_num || 0);
                 });
 
-                renderFullFlow(fullFlow, bestMatch.score);
-                
                 activeContextText = fullFlow.map(f => `${f.id}: ${f.text}`).join("\n");
-                document.getElementById('chatContextStatus').innerText = `Context: ${bestMatch.source_id}`;
+                document.getElementById('chatContextStatus').innerText = `Context: ${sourceId}`;
                 document.getElementById('chatInput').disabled = false;
                 document.getElementById('chatSendBtn').disabled = false;
                 
                 chatHistory = [];
-                document.getElementById('chatMessages').innerHTML = `<div class="bubble bubble-ai">Loaded <b>${fullFlow.length}</b> nodes for ${bestMatch.source_id}. You can now send questions in Stage 4.</div>`;
+                document.getElementById('chatMessages').innerHTML = `
+                    <div class="bubble bubble-ai">
+                        <b>Grounding Established:</b><br>
+                        I have loaded the full architectural sequence for <b>${sourceId}</b> (${fullFlow.length} logic nodes).<br><br>
+                        How can I assist you with this integration?
+                    </div>`;
+                
+                updateDiscoveryUIHighlight(sourceId);
             };
         }
 
-        function renderFullFlow(data, score) {
-            const container = document.getElementById('searchResults');
-            const sourceId = data[0].source_id;
-
-            container.innerHTML = `
-                <div class="arch-match-header p-4 shadow-md mb-4">
-                    <div class="flex justify-between items-start mb-1">
-                        <span class="text-[8px] font-black uppercase tracking-widest opacity-60">Architectural Discovery</span>
-                        <span class="text-[9px] bg-emerald-500 px-2 py-0.5 rounded-full font-bold">Score: ${Math.round(score * 100)}%</span>
-                    </div>
-                    <h3 class="text-[11px] font-bold truncate mb-1" title="${sourceId}">${sourceId}</h3>
-                    <p class="text-[9px] opacity-70">${data.length - 1} technical steps pulled.</p>
-                </div>
-            `;
-
-            container.innerHTML += data.map(res => {
-                if (res.id === "ARCH_ANALYSIS") {
-                    return `
-                        <div class="p-3 bg-white border-2 border-slate-800 rounded-xl mb-4 shadow-sm">
-                            <div class="text-[8px] font-bold text-slate-400 uppercase mb-1">Architectural Focus</div>
-                            <p class="text-[10px] text-slate-800 font-medium">${res.text.replace(/\[Source:.*?\] ARCHITECTURE: /, '')}</p>
-                        </div>
-                    `;
+        function updateDiscoveryUIHighlight(sourceId) {
+            const items = document.querySelectorAll('#searchResults > div');
+            items.forEach(item => {
+                const h3 = item.querySelector('h3');
+                if(h3 && h3.innerText === sourceId) {
+                    item.classList.add('border-blue-500', 'ring-2', 'ring-blue-100');
+                } else {
+                    item.classList.remove('border-blue-500', 'ring-2', 'ring-blue-100');
                 }
-                return `
-                    <div class="p-2 step-bubble rounded-lg text-[9px] mb-2">
-                        <div class="font-bold text-slate-400 text-[8px] uppercase mb-1">${res.id} • ${res.type}</div>
-                        <p class="text-slate-600">${res.text.replace(/\[Source:.*?\] STEP \d+ \(.*?\): /, '')}</p>
-                    </div>
-                `;
-            }).join('');
-            container.scrollTop = 0;
+            });
         }
 
         // --- STAGE 4 ---
@@ -584,6 +615,7 @@
 
         window.deleteSource = deleteSource;
         window.updateStorageList = updateStorageList;
+        window.loadIFlowContext = loadIFlowContext;
 
     </script>
 </body>
