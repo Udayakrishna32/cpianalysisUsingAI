@@ -99,14 +99,19 @@
                     </div>
                     <div>
                         <label class="text-[9px] font-bold text-indigo-400 uppercase tracking-tighter">API Key</label>
-                        <input type="password" id="apiConfigKey" placeholder="Your API Key" class="w-full text-xs p-2 rounded border-none outline-none focus:ring-1 ring-indigo-400">
+                        <input type="password" id="apiConfigKey" placeholder="sk-..." class="w-full text-xs p-2 rounded border-none outline-none focus:ring-1 ring-indigo-400">
                     </div>
                     <div>
                         <label class="text-[9px] font-bold text-indigo-400 uppercase tracking-tighter">Model ID</label>
                         <input type="text" id="apiConfigModel" placeholder="deepseek-chat" class="w-full text-xs p-2 rounded border-none outline-none focus:ring-1 ring-indigo-400">
                     </div>
-                    <div class="mt-2 p-2 bg-white rounded border border-indigo-100 text-[8px] text-indigo-400 leading-tight">
-                        <b>Pro Tip:</b> If on GitHub and still failing, check browser console (F12) -> Network to see if an ad-blocker is killing the request.
+                    <div>
+                        <label class="text-[9px] font-bold text-orange-500 uppercase tracking-tighter flex justify-between">
+                            CORS Proxy (REQUIRED FOR BROWSER)
+                            <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" class="underline text-[8px]">Request Access</a>
+                        </label>
+                        <input type="text" id="apiConfigProxy" placeholder="https://cors-anywhere.herokuapp.com/" class="w-full text-[10px] p-2 rounded border-none outline-none focus:ring-1 ring-orange-400 bg-orange-50">
+                        <p class="text-[8px] text-slate-400 mt-1">Leave empty if using a local LLM or if your provider allows browser requests.</p>
                     </div>
                 </div>
 
@@ -186,6 +191,7 @@
         const STORAGE_KEY_API = "cpi_rag_universal_key";
         const STORAGE_KEY_URL = "cpi_rag_universal_url";
         const STORAGE_KEY_MODEL = "cpi_rag_universal_model";
+        const STORAGE_KEY_PROXY = "cpi_rag_universal_proxy";
 
         async function initDB() {
             return new Promise((resolve, reject) => {
@@ -455,14 +461,15 @@
             });
         }
 
-        // --- STAGE 4 LOGIC: Universal Connection Strategy ---
+        // --- STAGE 4 LOGIC: Final CORS/DeepSeek Fix ---
         async function sendChatMessage() {
             const input = document.getElementById('chatInput');
             const btn = document.getElementById('chatSendBtn');
             const query = input.value.trim();
-            const apiUrl = document.getElementById('apiConfigUrl').value.trim();
+            let apiUrl = document.getElementById('apiConfigUrl').value.trim();
             const apiKey = document.getElementById('apiConfigKey').value.trim();
             const model = document.getElementById('apiConfigModel').value.trim();
+            const proxy = document.getElementById('apiConfigProxy').value.trim();
 
             if (!query || !activeContextText || !apiKey) return;
 
@@ -472,35 +479,23 @@
             btn.innerText = "...";
             const thinkingId = addBubble("<span class='loading-pulse'>AI Processing...</span>", 'ai');
 
-            const systemPrompt = `You are a professional SAP CPI Architect. 
-            CONTEXT:
-            ${activeContextText}
-            Use the context above to answer technical questions or logic changes. Reference STEP numbers.`;
+            // Apply Proxy if present
+            const fullUrl = proxy ? (proxy + apiUrl) : apiUrl;
 
             const messages = [
-                { role: 'system', content: systemPrompt },
+                { role: 'system', content: `You are a professional SAP CPI Architect. Use the provided context to answer technical integration questions. Refer to STEP numbers. Context: ${activeContextText}` },
                 ...chatHistory,
                 { role: 'user', content: query }
             ];
 
-            const headers = { 
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-            };
-
-            // Smart Headers: OpenRouter needs these, DeepSeek might fail if they are present
-            if (apiUrl.toLowerCase().includes("openrouter.ai")) {
-                headers['HTTP-Referer'] = window.location.origin;
-                headers['X-Title'] = 'CPI RAG Architect';
-            }
-
             try {
-                const response = await fetch(apiUrl, {
+                // Request identical to Python Logic
+                const response = await fetch(fullUrl, {
                     method: 'POST',
-                    headers: headers,
-                    credentials: 'omit', // Stop sandbox cookies from interfering
-                    mode: 'cors',        // Explicitly request CORS
-                    referrerPolicy: 'no-referrer', // Prevents passing sandbox referrers that cause 403s
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
                     body: JSON.stringify({ 
                         model: model, 
                         messages: messages,
@@ -523,7 +518,15 @@
             } catch (err) {
                 console.error("Fetch Error:", err);
                 let errorMessage = `<span class="text-red-500 font-bold">Fetch Failure:</span> ${err.message}<br><br>`;
-                errorMessage += `<small><b>Still failing on GitHub?</b> Ensure you are using the <code>https://your-user.github.io/...</code> address and not a local file path. Also try disabling Ad-blockers for this page.</small>`;
+                
+                if (err.message.includes("Failed to fetch") && !proxy) {
+                    errorMessage += `<small class="text-orange-600 font-bold underline">CORS BLOCK DETECTED:</small><br>
+                    <small>DeepSeek API blocks browser requests (GitHub Pages/Sandbox) for security.<br><br>
+                    <b>HOW TO FIX:</b><br>
+                    1. Go to <a href="https://cors-anywhere.herokuapp.com/corsdemo" target="_blank" class="underline">CORS-Anywhere Demo</a> and click the big button to "Request temporary access".<br>
+                    2. Paste <code>https://cors-anywhere.herokuapp.com/</code> into the "CORS Proxy" field in Stage 2.<br>
+                    3. Try sending your question again.</small>`;
+                }
                 updateBubble(thinkingId, errorMessage);
             } finally {
                 btn.disabled = false;
@@ -554,17 +557,26 @@
             const savedKey = localStorage.getItem(STORAGE_KEY_API);
             const savedUrl = localStorage.getItem(STORAGE_KEY_URL);
             const savedModel = localStorage.getItem(STORAGE_KEY_MODEL);
+            const savedProxy = localStorage.getItem(STORAGE_KEY_PROXY);
+            
             const keyEl = document.getElementById('apiConfigKey');
             const urlEl = document.getElementById('apiConfigUrl');
             const modelEl = document.getElementById('apiConfigModel');
+            const proxyEl = document.getElementById('apiConfigProxy');
+
             if (savedKey) keyEl.value = savedKey;
             if (savedUrl) urlEl.value = savedUrl;
             else urlEl.value = "https://api.deepseek.com/chat/completions";
+
             if (savedModel) modelEl.value = savedModel;
             else modelEl.value = "deepseek-chat";
+
+            if (savedProxy) proxyEl.value = savedProxy;
+
             keyEl.addEventListener('input', () => localStorage.setItem(STORAGE_KEY_API, keyEl.value));
             urlEl.addEventListener('input', () => localStorage.setItem(STORAGE_KEY_URL, urlEl.value));
             modelEl.addEventListener('input', () => localStorage.setItem(STORAGE_KEY_MODEL, modelEl.value));
+            proxyEl.addEventListener('input', () => localStorage.setItem(STORAGE_KEY_PROXY, proxyEl.value));
         }
 
         document.getElementById('searchBtn').addEventListener('click', performSearch);
