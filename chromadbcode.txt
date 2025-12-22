@@ -1,0 +1,128 @@
+from typing import TYPE_CHECKING, List
+from langchain_chroma import Chroma
+from lfx.base.vectorstores.model import LCVectorStoreComponent, check_cached_vector_store
+from lfx.inputs.inputs import HandleInput, IntInput, StrInput, BoolInput
+from lfx.schema.data import Data
+from lfx.schema.dataframe import DataFrame
+
+class CPIChromaComponent(LCVectorStoreComponent):
+    display_name: str = "CPI Chroma DB (Grounded)"
+    description: str = "Retrieves full iFlow context and prevents duplicate records using Source ID deduplication."
+    name = "CPIChroma"
+    icon = "Chroma"
+
+    inputs = [
+        StrInput(
+            name="collection_name",
+            display_name="Collection Name",
+            value="cpi_knowledge_base",
+        ),
+        StrInput(
+            name="persist_directory",
+            display_name="Persist Directory",
+            info="Path to store the vector database.",
+        ),
+        HandleInput(name="embedding", display_name="Embedding Model", input_types=["Embeddings"]),
+        IntInput(
+            name="top_k_iflows",
+            display_name="Top-K iFlows",
+            info="Number of unique iFlows to retrieve full context for.",
+            value=1,
+        ),
+        BoolInput(
+            name="upsert_mode",
+            display_name="Upsert Mode (Deduplicate)",
+            info="If enabled, existing records for the same iFlow will be deleted before new ones are added.",
+            value=True,
+            advanced=True
+        ),
+        *LCVectorStoreComponent.inputs, # Includes search_query and ingest_data
+    ]
+
+    @check_cached_vector_store
+    def build_vector_store(self) -> Chroma:
+        persist_directory = self.resolve_path(self.persist_directory) if self.persist_directory else None
+        
+        chroma = Chroma(
+            persist_directory=persist_directory,
+            embedding_function=self.embedding,
+            collection_name=self.collection_name,
+        )
+
+        # Add data if provided (Stage 1 & 2 logic)
+        if self.ingest_data:
+            self._add_documents_to_vector_store(chroma)
+            
+        return chroma
+
+    def search_documents(self) -> List[Data]:
+        if not self.search_query:
+            return []
+
+        # Obtain the vector store instance
+        vector_store = self.build_vector_store()
+
+        # 1. Similarity Search to find candidate iFlows
+        initial_hits = vector_store.similarity_search(self.search_query, k=10)
+        
+        # 2. Extract unique Source IDs from the best Architecture matches
+        candidate_sources = []
+        for doc in initial_hits:
+            source_id = doc.metadata.get("source_id")
+            chunk_type = doc.metadata.get("chunk_type")
+            
+            if chunk_type == "Architecture" and source_id not in candidate_sources:
+                candidate_sources.append(source_id)
+            
+            if len(candidate_sources) >= self.top_k_iflows:
+                break
+
+        if not candidate_sources:
+            if initial_hits:
+                candidate_sources = [initial_hits[0].metadata.get("source_id")]
+            else:
+                return []
+
+        # 3. Pull FULL context for identified sources (using high limit to avoid truncation)
+        results = []
+        for source in candidate_sources:
+            full_iflow_docs = vector_store.get(where={"source_id": source}, limit=1000)
+            
+            for i in range(len(full_iflow_docs["documents"])):
+                metadata = full_iflow_docs["metadatas"][i]
+                text = full_iflow_docs["documents"][i]
+                
+                results.append(Data(text=text, data=metadata))
+
+        # 4. Sort by Step Number
+        def get_step_num(item):
+            val = item.data.get("step_num", 0)
+            try:
+                return int(val) if str(val).isdigit() else 999
+            except:
+                return 999
+
+        results.sort(key=get_step_num)
+        return results
+
+    def _add_documents_to_vector_store(self, vector_store: "Chroma") -> None:
+        """Adds documents to the Vector Store with optional deduplication."""
+        ingest_data = self._prepare_ingest_data()
+        documents = [d.to_lc_document() for d in ingest_data if isinstance(d, Data)]
+        
+        if documents:
+            if self.upsert_mode:
+                # Identify the iFlow names (source_id) being uploaded
+                unique_source_ids = {doc.metadata.get("source_id") for doc in documents if doc.metadata.get("source_id")}
+                
+                for sid in unique_source_ids:
+                    try:
+                        # Delete existing entries for this iFlow to prevent duplicates
+                        vector_store.delete(where={"source_id": sid})
+                        self.log(f"Cleaned up existing records for iFlow: {sid}")
+                    except Exception as e:
+                        self.log(f"No existing records to clear for {sid} or encountered error: {str(e)}")
+
+            # Add the new documents
+            vector_store.add_documents(documents)
+            self.log(f"Stored {len(documents)} logic chunks successfully.")
