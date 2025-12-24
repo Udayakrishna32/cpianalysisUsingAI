@@ -82,7 +82,7 @@ class DeepSeekAIHelper:
         return "(Error: Max retries exceeded)"
 
     def get_step_summary(self, context, data, process_name):
-        system_msg = f"You are an SAP CPI expert. Briefly explain what this step does within the context of the '{process_name}' process. 1-2 sentences max."
+        system_msg = f"You are an SAP CPI expert. Briefly explain what this step does within the context of the '{process_name}' process.produce ONE single-paragraph, implementation-accurate description of the CPI step., example (style reference only): Reads exchange property P_LastSuccessfulRunDate, writes exchange property P_QueryFilter using the resolved timestamp, does not modify the message body or headers, persists no state beyond runtime, requires P_LastSuccessfulRunDate to be present in the exchange context, and throws a runtime exception if the property is missing or invalid etc etc like this"
         user_msg = f"Step Type: {context}\nTechnical Data:\n{data}"
         messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}]
         return self._call_api(messages)
@@ -285,9 +285,7 @@ class CPIFlowAnalyzer:
 
         self.rag_data["steps"].append({
             "step": self.step_counter,
-            "name": node['name'],
             "type": node['type'],
-            "process": node['process_name'],
             "description": summary
         })
         self.functional_summaries.append(f"{node['name']} ({node['type']}): {summary}")
