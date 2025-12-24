@@ -58,6 +58,34 @@ RULES:
 # Prompt for Step Description (Text)
 DESCRIPTION_SYSTEM_PROMPT = """You are an SAP CPI expert. Briefly explain what this step does within the context of the '{process_name}' process.produce ONE single-paragraph, implementation-accurate description of the CPI step., example (style reference only): Reads exchange property P_LastSuccessfulRunDate, writes exchange property P_QueryFilter using the resolved timestamp, does not modify the message body or headers, persists no state beyond runtime, requires P_LastSuccessfulRunDate to be present in the exchange context, and throws a runtime exception if the property is missing or invalid etc etc like this"""
 
+# Prompt for UAT Generation (Text)
+UAT_GENERATION_PROMPT = """You are a Senior SAP CPI QA Engineer.
+Your task is to generate a UAT (User Acceptance Testing) Test Case specifically for the provided Variable Chain.
+
+Context:
+- Variable Name: {var_name}
+- Scope: {var_scope}
+
+The "Chain" represents the lifecycle of this variable: where it is created, used for decisions, modified, or persisted.
+
+Step Descriptions (Reference):
+{step_descriptions}
+
+Variable Chain (Trace):
+{chain_trace}
+
+Task:
+Generate 1-2 specific UAT Scenarios to verify the logic associated with this variable.
+For each scenario, provide:
+1. Scenario Name
+2. Preconditions (Value of variable, setup required)
+3. Input Data (If applicable)
+4. Expected Behavior/Path (Refer to Step IDs)
+5. Success Criteria (What confirms the test passed?)
+
+Format: Markdown. Do not include introductory filler text.
+"""
+
 class DeepSeekAIHelper:
     def __init__(self, api_key):
         self.api_key = api_key
@@ -112,6 +140,16 @@ class DeepSeekAIHelper:
         system_msg = DESCRIPTION_SYSTEM_PROMPT.format(process_name=process_name)
         user_msg = f"Step Type: {context}\nTechnical Data:\n{data}"
         messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}]
+        return self._call_api(messages, json_mode=False)
+
+    def generate_uat(self, var_name, var_scope, chain_trace, step_descriptions):
+        user_msg = UAT_GENERATION_PROMPT.format(
+            var_name=var_name,
+            var_scope=var_scope,
+            chain_trace=chain_trace,
+            step_descriptions=step_descriptions
+        )
+        messages = [{"role": "user", "content": user_msg}]
         return self._call_api(messages, json_mode=False)
 
 class CPIFlowAnalyzer:
@@ -407,6 +445,68 @@ class CPIFlowAnalyzer:
             "variables": final_var_list
         }
 
+    def generate_uat_report(self, variable_data_json):
+        print("  [+] Generating UAT Scenarios for Variable Chains...")
+        report_lines = [f"# UAT Report for {variable_data_json['analysis_metadata']['flow_name']}", ""]
+        
+        variables = variable_data_json['variables']
+        
+        # Filter variables to meaningful ones to avoid token exhaustion/time
+        # Criteria: Controls logic OR Persisted OR Modified OR Used in Output OR Complete Chain
+        
+        for var in variables:
+            # Skip if never consumed/used
+            usage = var['usage_summary']
+            is_interesting = (
+                var['is_control_variable'] or 
+                len(usage['persistence_points']) > 0 or
+                len(usage['controls_behavior_at_steps']) > 0 or
+                # Check if it connects at least two distinct steps (creation -> usage)
+                (len(usage['defined_at_steps']) > 0 and len(usage['consumed_at_steps']) > 0)
+            )
+            
+            if not is_interesting:
+                continue
+
+            var_name = var['variable_name']
+            print(f"    > Generating UAT for chain: {var_name}")
+            
+            # 1. Build Chain Trace String
+            chain_lines = []
+            unique_step_ids = []
+            step_descriptions_map = {} # id -> desc
+            
+            for trace_item in var['lifecycle_trace']:
+                sid = trace_item['step_id']
+                stype = trace_item['step_type']
+                action = trace_item['action']
+                context = trace_item['context']
+                desc = trace_item.get('step_description', '')
+                
+                chain_lines.append(f"Step {sid} [{stype}]: {action} - {context}")
+                
+                # Deduplicate descriptions: only store if new step ID and description exists
+                if sid not in step_descriptions_map and desc:
+                    step_descriptions_map[sid] = desc
+                    unique_step_ids.append(sid) # Keep order
+            
+            chain_text = "\n".join(chain_lines)
+            
+            # 2. Build Unique Descriptions String
+            desc_lines = []
+            for sid in unique_step_ids:
+                desc_lines.append(f"Step {sid}: {step_descriptions_map[sid]}")
+            desc_text = "\n\n".join(desc_lines)
+            
+            # 3. Call AI
+            uat_content = self.ai.generate_uat(var_name, var['scope'], chain_text, desc_text)
+            
+            report_lines.append(f"## Variable: {var_name}")
+            report_lines.append(uat_content)
+            report_lines.append("\n---\n")
+            
+        return "\n".join(report_lines)
+
     def process(self):
         start_node = self.processes.get(self.main_process_id, {}).get('start')
         if not start_node:
@@ -419,10 +519,18 @@ class CPIFlowAnalyzer:
         print(f"  [+] Aggregating variable data...")
         final_json = self._aggregate_and_structure_data()
         
-        out = f"variable_lifecycle_{self.zip_path.stem}.json"
-        with open(out, 'w', encoding='utf-8') as f:
+        # Save Variable Lifecycle JSON
+        json_out = f"variable_lifecycle_{self.zip_path.stem}.json"
+        with open(json_out, 'w', encoding='utf-8') as f:
             json.dump(final_json, f, indent=2)
-        print(f"  [OK] Successfully generated Variable Schema. Output: {out}")
+        print(f"  [OK] Variable Schema saved to: {json_out}")
+
+        # Generate and Save UAT Report
+        uat_report = self.generate_uat_report(final_json)
+        report_out = f"uat_report_{self.zip_path.stem}.md"
+        with open(report_out, 'w', encoding='utf-8') as f:
+            f.write(uat_report)
+        print(f"  [OK] UAT Report saved to: {report_out}")
 
 def main():
     if len(sys.argv) < 2:
