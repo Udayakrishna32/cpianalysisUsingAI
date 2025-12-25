@@ -80,7 +80,10 @@ For each scenario, provide:
 1. Scenario Name
 2. Preconditions (Value of variable, setup required)
 3. Input Data (If applicable)
-4. Expected Behavior/Path (Refer to Step IDs)
+4. Expected Behavior/Path (Narrative Format):
+   - Instead of just listing IDs, explain the flow narratively.
+   - Example: "First, the flow reaches Step 31 (Data Store), where it persists the payload..."
+   - Explicitly mention the Step Type (e.g., Groovy Script, Content Modifier) and its specific action from the descriptions provided.
 5. Success Criteria (What confirms the test passed?)
 
 Format: Markdown. Do not include introductory filler text.
