@@ -28,32 +28,39 @@ try:
     import win32com.client
     import pythoncom
 except ImportError:
-    # We don't error immediately, but rendering features won't work without pywin32
     pass
 
 # ==========================================
 # 1. CONFIGURATION & SETUP
 # ==========================================
 
-st.set_page_config(page_title="PPT RAG Explorer", layout="wide")
+st.set_page_config(page_title="EY Internal - PPT Searcher", layout="wide")
 
 # Default Constants
 DEFAULT_TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-DEFAULT_API_KEY = "sk-f7d101c4a97246318ab270f5d67abfdd"
+# SECURITY WARNING: Ideally, use environment variables for keys, do not hardcode in production.
+DEFAULT_API_KEY = "" 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2" # Small, fast, effective for local use
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2" 
+TEMP_DIR = "temp_ppts"
+
+# Ensure Temp Directory Exists
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
 
 # Initialize Session State
 if "extracted_data" not in st.session_state:
-    st.session_state.extracted_data = None
+    st.session_state.extracted_data = []
 if "vector_db_ready" not in st.session_state:
     st.session_state.vector_db_ready = False
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "active_slide_id" not in st.session_state:
     st.session_state.active_slide_id = None
-if "current_ppt_path" not in st.session_state:
-    st.session_state.current_ppt_path = None
+if "active_ppt_id" not in st.session_state:
+    st.session_state.active_ppt_id = None
+if "ppt_sources" not in st.session_state:
+    st.session_state.ppt_sources = {} # Maps filename -> file_path
 
 # ==========================================
 # 2. HELPER: SLIDE RENDERING (VISUAL)
@@ -62,24 +69,24 @@ if "current_ppt_path" not in st.session_state:
 def render_slide_as_image(ppt_path, slide_index):
     """
     Uses Microsoft PowerPoint (via COM) to export a specific slide as an image.
-    ppt_path: Absolute path to the PPTX file.
-    slide_index: 1-based index of the slide.
-    Returns: Path to the generated image or None if failed.
     """
+    if not os.path.exists(ppt_path):
+        return None
+
     try:
-        # Initialize COM library (needed for Streamlit threads)
         pythoncom.CoInitialize()
-        
-        # Connect to PowerPoint
         ppt_app = win32com.client.Dispatch("PowerPoint.Application")
-        # ppt_app.Visible = 1  # Uncomment if debugging, otherwise keep hidden
         
         # Open Presentation (Read-only, No Window)
         presentation = ppt_app.Presentations.Open(ppt_path, WithWindow=False)
         
         # Output File Path
-        output_img_path = os.path.abspath(f"temp_slide_{slide_index}.jpg")
+        output_img_path = os.path.abspath(f"temp_slide_render.jpg")
         
+        # Remove existing render if any
+        if os.path.exists(output_img_path):
+            os.remove(output_img_path)
+
         # Export Slide (Index is 1-based in COM)
         presentation.Slides(slide_index).Export(output_img_path, "JPG")
         
@@ -90,7 +97,6 @@ def render_slide_as_image(ppt_path, slide_index):
         print(f"Rendering Error: {e}")
         return None
     finally:
-        # Ensure COM is uninitialized
         pythoncom.CoUninitialize()
 
 # ==========================================
@@ -150,29 +156,21 @@ def generate_questions_api(content, slide_id, api_key):
     except Exception as e:
         return f"API Error: {e}"
 
-def process_ppt_file(uploaded_file, tesseract_path, api_key):
-    # Setup Tesseract
+def process_ppt_file(file_path, original_filename, tesseract_path, api_key):
     pytesseract.pytesseract.tesseract_cmd = tesseract_path
     
-    # Save uploaded file to temp (Use Absolute Path for COM compatibility)
-    abs_path = os.path.abspath("temp_input.pptx")
-    with open(abs_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    
-    st.session_state.current_ppt_path = abs_path
-    
-    ppt_filename = uploaded_file.name
-    prs = Presentation(abs_path)
+    prs = Presentation(file_path)
     output_data = []
     
+    # Create a container for progress unique to this file
+    st.write(f"Processing: **{original_filename}**")
     progress_bar = st.progress(0)
-    status_text = st.empty()
     total_slides = len(prs.slides)
 
     for i, slide in enumerate(prs.slides):
         slide_num = i + 1
-        slide_id = f"{ppt_filename}_slide_{slide_num}"
-        status_text.text(f"Processing Slide {slide_num}/{total_slides}...")
+        # Create a unique ID combining filename and slide number
+        slide_id = f"{original_filename}::Slide-{slide_num}"
         
         # Extract Text & Images
         extracted_parts = []
@@ -192,13 +190,12 @@ def process_ppt_file(uploaded_file, tesseract_path, api_key):
         # Generate Questions
         questions = generate_questions_api(full_text, slide_id, api_key)
         
-        # Dynamic Keys Logic
-        text_key = f"text_{slide_id}"
-        q_key = f"Questions_{slide_id}"
+        text_key = f"text_content"
+        q_key = f"generated_questions"
 
         output_data.append({
             "slide": slide_num,
-            "ppt_id": ppt_filename,
+            "ppt_id": original_filename, # Used to lookup file path later
             "slideID": slide_id,
             text_key: full_text,
             q_key: questions
@@ -206,14 +203,13 @@ def process_ppt_file(uploaded_file, tesseract_path, api_key):
         
         progress_bar.progress((i + 1) / total_slides)
 
-    status_text.text("Processing Complete!")
     return output_data
 
 # ==========================================
 # 4. VECTOR DB LOGIC
 # ==========================================
 
-def build_vector_db(data):
+def build_vector_db(data_list):
     client = chromadb.PersistentClient(path="./chroma_db")
     
     try:
@@ -234,12 +230,13 @@ def build_vector_db(data):
     metadatas = []
     ids = []
 
-    for item in data:
+    for item in data_list:
         s_id = item['slideID']
-        text_content = item.get(f"text_{s_id}", "")
-        questions_content = item.get(f"Questions_{s_id}", "")
+        text_content = item.get("text_content", "")
+        questions_content = item.get("generated_questions", "")
         
-        documents.append(questions_content)
+        # We index the Generated Questions + Raw Text for better retrieval
+        documents.append(f"{questions_content}\n\n{text_content}")
         
         metadatas.append({
             "slideID": s_id, 
@@ -249,7 +246,8 @@ def build_vector_db(data):
         })
         ids.append(s_id)
 
-    collection.add(documents=documents, metadatas=metadatas, ids=ids)
+    if documents:
+        collection.add(documents=documents, metadatas=metadatas, ids=ids)
     return client, collection
 
 def query_vector_db(query, collection, n_results=1):
@@ -290,71 +288,100 @@ with st.sidebar:
     # 1. SIDEBAR VIEWER LOGIC (Top Priority)
     if st.session_state.active_slide_id:
         with st.container(border=True):
-            st.subheader(f"📑 Viewer: {st.session_state.active_slide_id}")
+            st.subheader(f"📑 Viewer")
+            st.caption(f"Slide: {st.session_state.active_slide_id}")
             
             # Close Button
             if st.button("❌ Close Viewer", use_container_width=True):
                 st.session_state.active_slide_id = None
+                st.session_state.active_ppt_id = None
                 st.rerun()
 
-            # Find Slide Index
+            # Find Metadata
             slide_idx = 1
-            if st.session_state.extracted_data:
-                for item in st.session_state.extracted_data:
-                    if item["slideID"] == st.session_state.active_slide_id:
-                        slide_idx = item["slide"]
-                        break
+            ppt_id = st.session_state.active_ppt_id
             
+            # Look up slide number in extracted data
+            current_slide_text = ""
+            for item in st.session_state.extracted_data:
+                if item["slideID"] == st.session_state.active_slide_id:
+                    slide_idx = item["slide"]
+                    ppt_id = item["ppt_id"]
+                    current_slide_text = item.get("text_content", "")
+                    break
+            
+            # Resolve File Path
+            ppt_file_path = st.session_state.ppt_sources.get(ppt_id)
+
             # --- RENDER SLIDE VISUALLY ---
-            if st.session_state.current_ppt_path and os.path.exists(st.session_state.current_ppt_path):
+            if ppt_file_path and os.path.exists(ppt_file_path):
                 with st.spinner("Rendering Slide View..."):
-                    img_path = render_slide_as_image(st.session_state.current_ppt_path, slide_idx)
+                    img_path = render_slide_as_image(ppt_file_path, slide_idx)
                     
                     if img_path and os.path.exists(img_path):
-                        st.image(img_path, caption=f"Original Slide {slide_idx}", use_container_width=True)
+                        st.image(img_path, caption=f"{ppt_id} - Slide {slide_idx}", use_container_width=True)
                     else:
-                        st.error("Could not render slide visual. (PowerPoint may not be accessible).")
-                        # Fallback to text
-                        st.warning("Showing extracted text instead:")
-                        slide_text = ""
-                        for item in st.session_state.extracted_data:
-                            if item["slideID"] == st.session_state.active_slide_id:
-                                slide_text = item.get(f"text_{st.session_state.active_slide_id}", "")
-                                break
-                        st.text_area("Content", slide_text, height=200, disabled=True)
+                        st.error("Could not render slide visual. (PowerPoint app required).")
+                        st.text_area("Content", current_slide_text, height=200, disabled=True)
             else:
-                st.error("PPT Source file missing.")
+                st.warning(f"Source file not found for: {ppt_id}")
+                st.text_area("Content", current_slide_text, height=200, disabled=True)
                 
         st.divider()
 
     # 2. CONFIGURATION
     st.header("⚙️ Configuration")
-    api_key_input = st.text_input("DeepSeek API Key", value=DEFAULT_API_KEY, type="password")
+    api_key_input = st.text_input("LLM API Key", value=DEFAULT_API_KEY, type="password")
     tesseract_input = st.text_input("Tesseract Path", value=DEFAULT_TESSERACT_PATH)
     
     st.divider()
     
-    uploaded_file = st.file_uploader("Upload PowerPoint", type=["pptx"])
+    # 3. MULTI-FILE UPLOADER
+    uploaded_files = st.file_uploader("Upload PowerPoint(s)", type=["pptx"], accept_multiple_files=True)
     
-    if uploaded_file and st.button("🚀 Process & Ingest"):
-        with st.spinner("Extracting Text & Images... (This may take a moment)"):
-            data = process_ppt_file(uploaded_file, tesseract_input, api_key_input)
-            st.session_state.extracted_data = data
+    if uploaded_files and st.button("🚀 Process All Files"):
+        st.session_state.extracted_data = [] # Reset data
+        st.session_state.ppt_sources = {}    # Reset sources
+        
+        # 1. Save all files first
+        for u_file in uploaded_files:
+            save_path = os.path.abspath(os.path.join(TEMP_DIR, u_file.name))
+            with open(save_path, "wb") as f:
+                f.write(u_file.getbuffer())
+            # Map filename to absolute path
+            st.session_state.ppt_sources[u_file.name] = save_path
+        
+        # 2. Process each file
+        all_extracted_data = []
+        
+        with st.status("Processing Files...", expanded=True) as status:
+            for u_file in uploaded_files:
+                file_path = st.session_state.ppt_sources[u_file.name]
+                st.write(f"Extracting: {u_file.name}...")
+                
+                # Process
+                file_data = process_ppt_file(file_path, u_file.name, tesseract_input, api_key_input)
+                all_extracted_data.extend(file_data)
+                
+            st.session_state.extracted_data = all_extracted_data
             
-        with st.spinner("Building Vector Database..."):
-            build_vector_db(data)
+            st.write("Building Knowledge Base...")
+            build_vector_db(all_extracted_data)
             st.session_state.vector_db_ready = True
-            st.success("Ingestion Complete!")
+            
+            status.update(label="Ingestion Complete!", state="complete", expanded=False)
+        
+        st.success(f"Processed {len(uploaded_files)} files. Total Slides: {len(all_extracted_data)}")
 
 # --- MAIN PAGE ---
-st.title("📄 Intelligent PPT Pipeline Explorer")
+st.title("EY Internal - PPT Searcher")
 
 tab1, tab2, tab3 = st.tabs(["🔍 Search Pipeline", "💬 Chat Assistant", "📊 Extracted Data"])
 
 # TAB 1: PIPELINE INTERFACE
 with tab1:
     if not st.session_state.vector_db_ready:
-        st.info("👈 Please upload a PPT and click 'Process & Ingest' to start.")
+        st.info("👈 Please upload PPTs and click 'Process All Files' to start.")
     else:
         client = chromadb.PersistentClient(path="./chroma_db")
         model = SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -364,7 +391,7 @@ with tab1:
         collection = client.get_collection("ppt_data", embedding_function=LocalEmbeddingFunction())
 
         st.subheader("Run Query Pipeline")
-        top_k = st.slider("Select Top-K Results", min_value=1, max_value=5, value=1)
+        top_k = st.slider("Select Top-K Results", min_value=1, max_value=10, value=3)
         user_query = st.chat_input("Enter your question here...", key="pipeline_input")
         
         if user_query:
@@ -376,46 +403,48 @@ with tab1:
             num_matches = len(results['ids'][0])
             for i in range(num_matches):
                 matched_slide_id = results['ids'][0][i]
-                matched_questions = results['documents'][0][i]
                 similarity_distance = results['distances'][0][i]
-                retrieved_text = results['metadatas'][0][i]['slide_text']
+                meta = results['metadatas'][0][i]
                 
-                st.markdown(f"#### Result #{i+1} (Slide ID: `{matched_slide_id}`)")
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.write("**Matched Synthetic Questions:**")
-                    st.code(matched_questions, language="text")
-                with col2:
-                    st.metric("Match Distance", f"{similarity_distance:.4f}")
-                st.warning(f"**Phase 2: Context Retrieval (text_{matched_slide_id})**")
-                st.text_area(f"Retrieved Slide Text (#{i+1}):", retrieved_text, height=150)
+                ppt_name = meta.get('ppt_id', 'Unknown')
+                retrieved_text = meta.get('slide_text', '')
+                
+                st.markdown(f"#### Result #{i+1}")
+                st.caption(f"File: **{ppt_name}** | ID: `{matched_slide_id}` | Distance: {similarity_distance:.4f}")
+                
+                st.text_area(f"Content #{i+1}:", retrieved_text, height=100)
                 st.divider()
 
 # TAB 2: CHAT ASSISTANT
 with tab2:
-    st.subheader("🤖 Slide-by-Slide Assistant")
-    
     if not st.session_state.vector_db_ready:
-        st.info("👈 Please process a document first.")
+        st.info("👈 Please process documents first.")
     else:
-        chat_k = st.slider("Context Slides to Check", 1, 5, 3, key="chat_k_slider")
+        chat_k = st.slider("Context Slides to Check", 1, 10, 3, key="chat_k_slider")
         
         # Display Chat History with Interactivity
         for idx, msg in enumerate(st.session_state.chat_history):
             with st.chat_message(msg["role"]):
                 if "structured_results" in msg:
                     st.markdown(msg["content"])
-                    st.caption("🔗 Relevant Slides (Click to View in Sidebar):")
-                    cols = st.columns(len(msg["structured_results"]))
-                    for col_i, item in enumerate(msg["structured_results"]):
-                        s_id = item['slide_id']
-                        if cols[col_i].button(f"📄 View {s_id}", key=f"hist_btn_{idx}_{s_id}"):
-                            st.session_state.active_slide_id = s_id
-                            st.rerun()
+                    if msg["structured_results"]:
+                        st.caption("🔗 Sources:")
+                        cols = st.columns(len(msg["structured_results"]))
+                        for col_i, item in enumerate(msg["structured_results"]):
+                            s_id = item['slide_id']
+                            p_id = item.get('ppt_id', 'Unknown')
+                            
+                            # Safely handle column index overflow if many results
+                            current_col = cols[col_i % len(cols)]
+                            
+                            if current_col.button(f"📄 View {s_id}", key=f"hist_btn_{idx}_{s_id}"):
+                                st.session_state.active_slide_id = s_id
+                                st.session_state.active_ppt_id = p_id
+                                st.rerun()
                 else:
                     st.markdown(msg["content"])
                 
-        if prompt := st.chat_input("Ask a question about your presentation...", key="chat_input"):
+        if prompt := st.chat_input("Ask a question about your presentations...", key="chat_input"):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
@@ -439,14 +468,23 @@ with tab2:
                 
                 for i in range(num_matches):
                     s_id = results['ids'][0][i]
-                    s_text = results['metadatas'][0][i]['slide_text']
+                    meta = results['metadatas'][0][i]
+                    s_text = meta['slide_text']
+                    p_id = meta.get('ppt_id')
                     
                     answer = generate_slide_answer(prompt, s_text, api_key_input)
                     
-                    if answer.upper() != "IRRELEVANT" and "IRRELEVANT" not in answer:
-                        entry = f"**{s_id}**\n{answer}\n\n---\n\n"
+                    # Enhanced filtering (Case-Insensitive & broad negative check)
+                    # We check if 'IRRELEVANT' appears anywhere in the uppercase answer
+                    answer_upper = answer.upper()
+                    
+                    if "IRRELEVANT" not in answer_upper and \
+                       "NOT APPLICABLE" not in answer_upper and \
+                       "CONTEXT DOES NOT CONTAIN" not in answer_upper:
+                        
+                        entry = f"**Source: {p_id} (Slide {meta['page_num']})**\n{answer}\n\n---\n\n"
                         full_response_text += entry
-                        structured_results.append({'slide_id': s_id, 'answer': answer})
+                        structured_results.append({'slide_id': s_id, 'ppt_id': p_id, 'answer': answer})
                 
                 if not structured_results:
                     full_response_text = "I couldn't find any relevant information in the top search results."
@@ -454,12 +492,18 @@ with tab2:
                 message_placeholder.markdown(full_response_text)
                 
                 if structured_results:
-                    st.caption("🔗 Relevant Slides (Click to View in Sidebar):")
-                    cols = st.columns(len(structured_results))
+                    st.caption("🔗 Sources (Click to View):")
+                    # Dynamically create columns based on count, max 4 per row visually
+                    num_cols = min(len(structured_results), 4)
+                    cols = st.columns(num_cols)
+                    
                     for col_i, item in enumerate(structured_results):
                         s_id = item['slide_id']
-                        if cols[col_i].button(f"📄 View {s_id}", key=f"new_btn_{s_id}"):
+                        p_id = item['ppt_id']
+                        current_col = cols[col_i % num_cols]
+                        if current_col.button(f"📄 View {s_id}", key=f"new_btn_{s_id}"):
                             st.session_state.active_slide_id = s_id
+                            st.session_state.active_ppt_id = p_id
                             st.rerun()
                 
                 st.session_state.chat_history.append({
@@ -471,7 +515,7 @@ with tab2:
 # TAB 3: DATA INSPECTION
 with tab3:
     if st.session_state.extracted_data:
-        st.write(f"Total Slides: {len(st.session_state.extracted_data)}")
-        st.json(st.session_state.extracted_data)
+        st.write(f"Total Slides Processed: {len(st.session_state.extracted_data)}")
+        st.dataframe(st.session_state.extracted_data)
     else:
         st.write("No data processed yet.")
