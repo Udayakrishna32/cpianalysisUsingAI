@@ -1,0 +1,295 @@
+import React, { useState } from 'react';
+import { Database, Search, ArrowRight, Layers, Target, Filter, Zap, XCircle, CheckCircle } from 'lucide-react';
+
+// MOCK DATA based on your CSV
+const DATABASE = [
+  {
+    id: "slide-6",
+    type: "Messy OCR Slide",
+    // The "Garbage" text from your CSV
+    text_content: `[Image Text]: gz = a “4 - j a } j - _ P a — / ae y\nChallenges with Apps\nHigh Dropout Rates\nLack of Personal Connection\n21% to 54% App Abandonment`,
+    // The "Gold" from your CSV
+    generated_questions: "1. What is causing high dropout rates?\n2. How to reduce app abandonment?\n3. Challenges with educational apps.",
+    // Simulating specific keywords for Hybrid Search
+    keywords: ["21%", "54%", "dropout", "abandonment", "apps"]
+  },
+  {
+    id: "slide-1",
+    type: "Clean Sales Slide",
+    text_content: `Sales Strategy Templates... Direct Sales: Sales team sells directly... Indirect Sales: Selling through distributors...`,
+    generated_questions: "What is direct sales? What is indirect sales?",
+    keywords: ["sales", "direct", "indirect", "strategy"]
+  }
+];
+
+export default function RAGArchitectureLab() {
+  const [level, setLevel] = useState(1); // 1=Naive, 2=Decoupled, 3=Full Advanced
+  const [query, setQuery] = useState("Why do users drop out?");
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const runSimulation = () => {
+    setLoading(true);
+    setResults(null);
+    
+    setTimeout(() => {
+      const qLower = query.toLowerCase();
+      
+      // LOGIC SIMULATION
+      let simulatedResults = DATABASE.map(doc => {
+        let score = 0;
+        let matchReason = "";
+        let retrievalMethod = "";
+
+        // LEVEL 1: NAIVE (Search Text Only)
+        if (level === 1) {
+          retrievalMethod = "Vector(Text)";
+          // Penalty for OCR noise
+          if (doc.text_content.includes("gz = a")) {
+             // If query matches a few words in text, but text is noisy
+             if (doc.text_content.toLowerCase().includes("dropout")) {
+                score = 0.65; // Mediocre score because noise dilutes the vector
+                matchReason = "Found 'dropout' in text, but confused by 'gz = a...' noise.";
+             } else {
+                score = 0.2; // Missed entirely
+                matchReason = "OCR noise overpowered semantic meaning.";
+             }
+          } else {
+             if (doc.text_content.toLowerCase().includes("sales") && qLower.includes("sales")) {
+                score = 0.9;
+                matchReason = "Clean text match.";
+             }
+          }
+        }
+
+        // LEVEL 2: DECOUPLED (Search Questions, Return Text)
+        if (level === 2) {
+          retrievalMethod = "Vector(Questions)";
+          // Searching against CLEAN Generated Questions
+          if (doc.generated_questions.toLowerCase().includes("dropout") && (qLower.includes("drop") || qLower.includes("abandon"))) {
+             score = 0.98; // Near perfect match
+             matchReason = "Perfect semantic match with Generated Question #1.";
+          } else if (doc.generated_questions.toLowerCase().includes("sales") && qLower.includes("sales")) {
+             score = 0.95;
+             matchReason = "Match with Generated Question.";
+          }
+        }
+
+        // LEVEL 3: HYBRID + RERANK (Keyword + Vector + Rerank)
+        if (level === 3) {
+          retrievalMethod = "Hybrid(BM25+Vector)";
+          
+          // 1. Vector Score (on Questions)
+          let vectorScore = 0;
+          if (doc.generated_questions.toLowerCase().includes("dropout") && (qLower.includes("drop") || qLower.includes("abandon"))) vectorScore = 0.95;
+          
+          // 2. Keyword Score (BM25 on Text - catches numbers)
+          let keywordScore = 0;
+          if (doc.text_content.includes("21%") && query.includes("21%")) keywordScore = 1.0;
+          if (doc.text_content.includes("54%") && query.includes("54%")) keywordScore = 1.0;
+
+          // Merge Scores
+          score = Math.max(vectorScore, keywordScore);
+
+          // Re-ranking simulation
+          if (score > 0.5) {
+             score += 0.1; // Re-ranker boost
+             matchReason = `Hybrid Hit: Vector(${vectorScore}) / Keyword(${keywordScore}). Re-ranker confirmed relevance.`;
+          } else {
+             matchReason = "Re-ranker filtered this out.";
+          }
+        }
+
+        return { ...doc, score, matchReason, retrievalMethod };
+      });
+
+      // Sort and filter
+      simulatedResults = simulatedResults.filter(r => r.score > 0.3).sort((a, b) => b.score - a.score);
+      
+      setResults(simulatedResults);
+      setLoading(false);
+    }, 600);
+  };
+
+  return (
+    <div className="p-6 max-w-4xl mx-auto bg-slate-50 min-h-screen font-sans text-slate-800">
+      
+      {/* Header */}
+      <div className="mb-8 text-center">
+        <h1 className="text-3xl font-bold text-slate-900 mb-2">RAG Architecture Levels</h1>
+        <p className="text-slate-600">Visualize the jump from "Naive" to "Advanced" with your CSV data.</p>
+      </div>
+
+      {/* Level Selector */}
+      <div className="grid grid-cols-3 gap-4 mb-8">
+        <button 
+          onClick={() => { setLevel(1); setResults(null); }}
+          className={`p-4 rounded-xl border-2 transition-all ${level === 1 ? 'border-red-500 bg-red-50 ring-2 ring-red-200' : 'border-slate-200 bg-white hover:border-red-200'}`}
+        >
+          <div className="font-bold text-red-700 mb-1">Level 1: Naive</div>
+          <div className="text-xs text-slate-500">Search Messy Text</div>
+          <div className="text-xs font-mono mt-2 bg-white p-1 rounded border border-red-100">Embed(text_content)</div>
+        </button>
+
+        <button 
+          onClick={() => { setLevel(2); setResults(null); }}
+          className={`p-4 rounded-xl border-2 transition-all ${level === 2 ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200' : 'border-slate-200 bg-white hover:border-blue-200'}`}
+        >
+          <div className="font-bold text-blue-700 mb-1">Level 2: Decoupled</div>
+          <div className="text-xs text-slate-500">Search Clean Questions</div>
+          <div className="text-xs font-mono mt-2 bg-white p-1 rounded border border-blue-100">Embed(generated_questions)</div>
+        </button>
+
+        <button 
+          onClick={() => { setLevel(3); setResults(null); }}
+          className={`p-4 rounded-xl border-2 transition-all ${level === 3 ? 'border-purple-500 bg-purple-50 ring-2 ring-purple-200' : 'border-slate-200 bg-white hover:border-purple-200'}`}
+        >
+          <div className="font-bold text-purple-700 mb-1">Level 3: Advanced</div>
+          <div className="text-xs text-slate-500">Hybrid + Re-ranking</div>
+          <div className="text-xs font-mono mt-2 bg-white p-1 rounded border border-purple-100">BM25(text) + Vector(q)</div>
+        </button>
+      </div>
+
+      {/* Simulation Area */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex gap-4">
+          <div className="flex-1">
+            <label className="text-xs font-bold text-slate-500 uppercase mb-1 block">User Query</label>
+            <input 
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-medium"
+            />
+          </div>
+          <div className="flex items-end">
+            <button 
+              onClick={runSimulation}
+              disabled={loading}
+              className={`px-6 py-3 rounded-lg font-bold text-white flex items-center gap-2 transition-colors ${
+                level === 1 ? 'bg-red-500 hover:bg-red-600' : 
+                level === 2 ? 'bg-blue-600 hover:bg-blue-700' : 
+                'bg-purple-600 hover:bg-purple-700'
+              }`}
+            >
+              {loading ? <Zap className="animate-pulse" /> : <Search className="w-5 h-5" />}
+              Run Search
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 min-h-[300px] bg-slate-50">
+           {!results && !loading && (
+             <div className="h-full flex flex-col items-center justify-center text-slate-400 mt-12">
+               <Database className="w-12 h-12 mb-4 opacity-20" />
+               <p>Select a level and run a search to see the mechanics.</p>
+             </div>
+           )}
+
+           {results && (
+             <div className="space-y-6">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-700">Retrieval Results</h3>
+                  <span className="text-xs bg-slate-200 text-slate-600 px-2 py-1 rounded-full">
+                    Architecture: {level === 1 ? 'Naive RAG' : level === 2 ? 'Decoupled Indexing' : 'Hybrid + Re-rank'}
+                  </span>
+                </div>
+
+                {results.length === 0 ? (
+                  <div className="p-4 bg-red-50 text-red-700 rounded-lg border border-red-200 flex items-center gap-3">
+                    <XCircle />
+                    <div>
+                      <div className="font-bold">No Results Found</div>
+                      <div className="text-sm opacity-75">The system could not match your query to any slides.</div>
+                    </div>
+                  </div>
+                ) : (
+                  results.map((res, i) => (
+                    <div key={i} className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden animate-in fade-in slide-in-from-bottom-2">
+                      {/* Result Header */}
+                      <div className={`p-3 flex justify-between items-center ${
+                        res.score > 0.8 ? 'bg-green-50 border-b border-green-100' : 'bg-yellow-50 border-b border-yellow-100'
+                      }`}>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs bg-white border border-slate-200 px-2 py-0.5 rounded">
+                            {res.id}
+                          </span>
+                          <span className="text-sm font-bold text-slate-700">{res.type}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-500 uppercase">Match Score:</span>
+                          <span className={`font-mono font-bold ${res.score > 0.8 ? 'text-green-600' : 'text-yellow-600'}`}>
+                            {(res.score * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Result Body */}
+                      <div className="p-4 grid md:grid-cols-2 gap-6">
+                        
+                        {/* LEFT: What we searched */}
+                        <div className="space-y-2">
+                          <div className="text-xs font-bold text-slate-400 uppercase flex items-center gap-1">
+                            <Target className="w-3 h-3" />
+                            Target Index (What matched)
+                          </div>
+                          <div className={`p-3 rounded text-sm font-mono border ${
+                             level === 1 ? 'bg-red-50 border-red-100 text-red-800' : 'bg-blue-50 border-blue-100 text-blue-800'
+                          }`}>
+                            {level === 1 ? (
+                              // Level 1 shows messy text
+                              <>
+                                <span className="opacity-50 block mb-1 text-[10px] uppercase">Raw Content:</span>
+                                {res.text_content.substring(0, 80)}...
+                              </>
+                            ) : (
+                              // Level 2/3 shows clean questions
+                              <>
+                                <span className="opacity-50 block mb-1 text-[10px] uppercase">Generated Question:</span>
+                                {res.generated_questions.split('?')[0]}?
+                              </>
+                            )}
+                          </div>
+                          <div className="text-xs text-slate-500 italic">
+                            Reason: {res.matchReason}
+                          </div>
+                        </div>
+
+                        {/* RIGHT: What goes to LLM */}
+                        <div className="space-y-2">
+                          <div className="text-xs font-bold text-slate-400 uppercase flex items-center gap-1">
+                            <ArrowRight className="w-3 h-3" />
+                            Payload (Sent to LLM)
+                          </div>
+                          <div className="p-3 rounded text-sm bg-slate-50 border border-slate-200 text-slate-600 h-full">
+                            {res.text_content.substring(0, 100)}...
+                          </div>
+                        </div>
+
+                      </div>
+                    </div>
+                  ))
+                )}
+             </div>
+           )}
+        </div>
+      </div>
+      
+      {/* Explanation Footer */}
+      <div className="mt-8 grid md:grid-cols-3 gap-6 text-sm text-slate-600">
+        <div className={`p-4 rounded-lg border ${level === 1 ? 'bg-red-50 border-red-200' : 'bg-transparent border-transparent'}`}>
+          <strong className="block text-slate-900 mb-1">Level 1 Reality</strong>
+          OCR noise ("gz=a") lowers the match score. You often get "No results" for valid questions.
+        </div>
+        <div className={`p-4 rounded-lg border ${level === 2 ? 'bg-blue-50 border-blue-200' : 'bg-transparent border-transparent'}`}>
+          <strong className="block text-slate-900 mb-1">Level 2 (Your Goal)</strong>
+          We ignore the messy text during search. We find the slide because the <em>question</em> matches perfectly.
+        </div>
+        <div className={`p-4 rounded-lg border ${level === 3 ? 'bg-purple-50 border-purple-200' : 'bg-transparent border-transparent'}`}>
+          <strong className="block text-slate-900 mb-1">Level 3 (Future)</strong>
+          If you search "54%", Vector search fails (numbers are hard for vectors). BM25 (Hybrid) catches it.
+        </div>
+      </div>
+
+    </div>
+  );
+}
